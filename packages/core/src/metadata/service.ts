@@ -74,7 +74,8 @@ export class MetadataService {
             let cinemetaVideos: CinemetaVideo[] | undefined;
 
             // Check anime database first
-            const animeEntry = await AnimeDatabase.getInstance().getEntryById(
+            const animeDb = AnimeDatabase.getInstance();
+            const animeEntry = await animeDb.getEntryById(
               id.type,
               id.value,
               id.season ? Number(id.season) : undefined,
@@ -121,6 +122,32 @@ export class MetadataService {
                 );
               }
             }
+
+            const siblingChecks: Promise<boolean>[] = [
+              animeDb.hasSiblingRecords(id.type, id.value),
+            ];
+            if (tmdbId) {
+              siblingChecks.push(
+                animeDb.hasSiblingRecords('themoviedbId', tmdbId)
+              );
+            }
+            if (tvdbId) {
+              siblingChecks.push(
+                animeDb.hasSiblingRecords('thetvdbId', tvdbId)
+              );
+            }
+            if (imdbId) {
+              siblingChecks.push(animeDb.hasSiblingRecords('imdbId', imdbId));
+            }
+
+            const hasSiblingAnimeRecords = (
+              await Promise.all(siblingChecks)
+            ).some(Boolean);
+
+            const suppressWholeShowAliases =
+              appConfig.metadata.animeDb.suppressSiblingAliases &&
+              !!animeEntry &&
+              hasSiblingAnimeRecords;
 
             if (animeEntry) {
               const aliases: MetadataTitle[] = [];
@@ -435,7 +462,9 @@ export class MetadataService {
             }
 
             const mediaType = type === 'movie' ? 'movie' : 'series';
-            let merged = mergeMetadata(contributions, mediaType);
+            let merged = mergeMetadata(contributions, mediaType, {
+              suppressWholeShowAliases,
+            });
 
             // series only: movie results carry a year already
             let titleConflictsPromise: Promise<TitleConflict[]> | undefined;
@@ -779,7 +808,9 @@ export class MetadataService {
             }
 
             // re-merge: the episode and scene steps added contributions
-            merged = mergeMetadata(contributions, mediaType);
+            merged = mergeMetadata(contributions, mediaType, {
+              suppressWholeShowAliases,
+            });
 
             if (
               !merged.titles.length ||

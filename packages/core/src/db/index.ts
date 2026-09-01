@@ -67,9 +67,19 @@ export {
   type ConfigAliasTarget,
 } from './repositories/config-profiles.js';
 export {
+  ConfigSessionRepository,
+  type ConfigSessionCredentials,
+  type IssuedConfigSession,
+} from './repositories/config-sessions.js';
+export {
   LinkedAccountRepository,
   MAX_LINKED_ACCOUNTS_PER_USER,
 } from './repositories/linked-accounts.js';
+export {
+  CommunityRepository,
+  type CommunityItemInsert,
+  type CommunityLiveUpdate,
+} from './repositories/community.js';
 export * from './schemas.js';
 
 export { sql, raw, join, SqlFragment } from './sql.js';

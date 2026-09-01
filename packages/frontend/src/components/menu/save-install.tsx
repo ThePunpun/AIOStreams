@@ -43,7 +43,7 @@ import {
   useConfirmationDialog,
 } from '../shared/confirmation-dialog';
 import { UserData, VariantSelectorLocation } from '@aiostreams/core';
-import { redactPresetOptions } from '@/lib/preset-credentials';
+import { sanitiseTemplateConfig } from '../../../../core/src/utils/template-sanitise';
 import { useSave } from '@/context/save';
 import { FiExternalLink } from 'react-icons/fi';
 import { ProfileCard } from './profile-card';
@@ -299,7 +299,7 @@ function SavePreferencesModal({
         </div>
         <Select
           label="Manifest change notices"
-          help="Stremio caches your manifest, so a change can need a reinstall. This is when you get told."
+          help="Some clients (e.g. Stremio) cache your manifest, so a change can need a reinstall. This is when you get told."
           value={manifestNotice}
           onValueChange={(value) =>
             onManifestNoticeChange(value as ManifestNotice)
@@ -763,8 +763,8 @@ function DangerZoneCard({
     <SettingsCard
       title="Danger Zone"
       description="Perform potentially destructive actions that cannot be undone"
-      className="lg:bg-red-950/70 border-red-500/20"
-      titleClassName="group-hover/settings-card:from-red-500/10 group-hover/settings-card:to-red-950/20"
+      className="lg:bg-red-700/70 border-red-500/20"
+      titleClassName="group-hover/settings-card:from-red-500/10 group-hover/settings-card:to-red-700/20"
     >
       <div className="flex flex-wrap items-center gap-3">
         {hasUser && (
@@ -1440,7 +1440,7 @@ function Content() {
     setEncryptedPassword,
   } = useUserData();
   const { data: linkedAccounts } = useQuery(
-    linkedAccountsQuery(uuid && password ? { uuid, password } : null)
+    linkedAccountsQuery(uuid ? { uuid, password } : null)
   );
   const preferencesModal = useDisclosure(false);
   const [newPassword, setNewPassword] = React.useState('');
@@ -1532,7 +1532,7 @@ function Content() {
     const requirements: string[] = [];
 
     // already created a config
-    if (uuid && password) {
+    if (uuid) {
       setPasswordRequirements([]);
       return;
     }
@@ -1603,50 +1603,12 @@ function Content() {
     reader.readAsText(file);
   };
 
-  const filterCredentials = (data: UserData): UserData => {
-    const clonedData = structuredClone(data);
-
-    return {
-      ...clonedData,
-      ip: undefined,
-      uuid: undefined,
-      accessKey: undefined,
-      tmdbAccessToken: undefined,
-      tmdbApiKey: undefined,
-      tvdbApiKey: undefined,
-      rpdbApiKey: undefined,
-      topPosterApiKey: undefined,
-      aioratingsApiKey: undefined,
-      aioratingsProfileId: undefined,
-      openposterdbApiKey: undefined,
-      openposterdbUrl: undefined,
-      openposterdbParameters: undefined,
-      services: clonedData?.services?.map((service) => ({
-        ...service,
-        credentials: {},
-      })),
-      // Scripts commonly carry a swapped service credential.
-      variants: clonedData?.variants?.map((variant) => ({
-        ...variant,
-        script: '# [redacted] variant scripts may contain credentials',
-      })),
-      proxy: {
-        ...clonedData?.proxy,
-        credentials: undefined,
-        url: undefined,
-        publicUrl: undefined,
-      },
-      presets: clonedData?.presets?.map((preset) => {
-        const presetMeta = status?.settings.presets.find(
-          (p) => p.ID === preset.type
-        );
-        return {
-          ...preset,
-          options: redactPresetOptions(preset.options, presetMeta?.OPTIONS),
-        };
-      }),
-    };
-  };
+  const filterCredentials = (data: UserData): UserData =>
+    sanitiseTemplateConfig(
+      data,
+      (type: string) =>
+        status?.settings.presets.find((p) => p.ID === type)?.OPTIONS
+    );
 
   const handleExport = () => {
     try {
@@ -1865,7 +1827,7 @@ function Content() {
         <div>
           <h2>Install Addon</h2>
           <p className="text-[--muted]">
-            Configure and install your personalized Stremio addon
+            Configure and install your personalized addon
           </p>
         </div>
         <div className="hidden lg:block lg:ml-auto">
@@ -2535,7 +2497,7 @@ function Content() {
               <Alert
                 intent="warning"
                 isClosable={false}
-                description="While excluding credentials removes your API keys, any custom addon URLs or manually overridden URLs in your config are not removed. These may contain sensitive information - double-check before sharing."
+                description="While excluding credentials removes your API keys, custom addon URLs, manually overridden URLs and variant scripts are left as written. These may contain sensitive information - double-check before sharing."
               />
             </div>
           </div>

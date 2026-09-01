@@ -3,6 +3,12 @@
  *
  */
 
+import type {
+  CommunityItemMine,
+  CommunityItemPublic,
+  CommunityKind,
+} from '@aiostreams/core';
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -232,11 +238,6 @@ interface ResolveSyncedResponse {
   errors?: { url: string; error: string }[];
 }
 
-interface FormatStreamResponse {
-  name: string;
-  description: string;
-}
-
 interface CatalogInfo {
   id: string;
   type: string;
@@ -289,19 +290,61 @@ function basicAuthHeader(uuid: string, password: string): string {
   return `Basic ${btoa(binary)}`;
 }
 
-/**
- * Load user configuration
- */
-export async function loadUserConfig(uuid: string, password: string) {
-  return api<LoadUserResponse>('GET /user', {
+// A null password means the session cookie authenticates the request instead.
+function configAuth(uuid: string, password: string | null) {
+  return password === null
+    ? {}
+    : { headers: { Authorization: basicAuthHeader(uuid, password) } };
+}
+
+export interface ConfigSession {
+  uuid: string;
+  remembered: boolean;
+  expiresAt: number;
+}
+
+export function hasConfigSessionCookie(): boolean {
+  if (typeof document === 'undefined') return false;
+  return document.cookie
+    .split(';')
+    .some((part) => part.trim().startsWith('aiostreams.has-config-session='));
+}
+
+export async function createConfigSession(
+  uuid: string,
+  password: string,
+  remember: boolean
+) {
+  return api<ConfigSession>('POST /user/session', {
+    body: { remember },
     headers: { Authorization: basicAuthHeader(uuid, password) },
   });
 }
 
-export async function loadRawUserConfig(uuid: string, password: string) {
-  return api<LoadUserResponse>('GET /user?raw=true', {
-    headers: { Authorization: basicAuthHeader(uuid, password) },
-  });
+export async function endConfigSession() {
+  return api<void>('DELETE /user/session');
+}
+
+export async function endAllConfigSessions() {
+  return api<{ count: number }>('DELETE /user/sessions');
+}
+
+/**
+ * Load user configuration
+ */
+export async function loadUserConfig(uuid: string, password: string | null) {
+  return api<LoadUserResponse>('GET /user', configAuth(uuid, password));
+}
+
+export async function loadRawUserConfig(uuid: string, password: string | null) {
+  return api<LoadUserResponse>(
+    'GET /user?raw=true',
+    configAuth(uuid, password)
+  );
+}
+
+export async function loadConfigFromSession() {
+  return api<LoadUserResponse>('GET /user?raw=true');
 }
 
 /**
@@ -319,11 +362,11 @@ export async function createUserConfig(config: UserData, password: string) {
 export async function updateUserConfig(
   uuid: string,
   config: UserData,
-  password: string
+  password: string | null
 ) {
   return api<UpdateUserResponse>('PUT /user', {
     body: { config },
-    headers: { Authorization: basicAuthHeader(uuid, password) },
+    ...configAuth(uuid, password),
   });
 }
 
@@ -418,7 +461,7 @@ export async function resolveSynced(
     regexUrls?: string[];
     selUrls?: string[];
   },
-  credentials?: { uuid: string; password: string }
+  credentials?: { uuid: string; password: string | null }
 ) {
   return api<ResolveSyncedResponse>('POST /sync/resolve', {
     body: {
@@ -435,7 +478,7 @@ export async function resolveSynced(
  */
 export async function resolveRegexPatterns(
   urls: string[],
-  credentials?: { uuid: string; password: string }
+  credentials?: Credentials
 ) {
   const result = await resolveSynced({ regexUrls: urls }, credentials);
   return { patterns: result.patterns || [], errors: result.errors };
@@ -446,19 +489,10 @@ export async function resolveRegexPatterns(
  */
 export async function resolveStreamExpressions(
   urls: string[],
-  credentials?: { uuid: string; password: string }
+  credentials?: Credentials
 ) {
   const result = await resolveSynced({ selUrls: urls }, credentials);
   return { expressions: result.expressions || [], errors: result.errors };
-}
-
-/**
- * Format stream for display
- */
-export async function getFormattedStream(stream: ParsedStream, context?: any) {
-  return api<FormatStreamResponse>('POST /format', {
-    body: { stream, context },
-  });
 }
 
 /**
@@ -542,12 +576,13 @@ export interface UserAnalyticsResponse {
 
 export async function fetchUserAnalytics(
   uuid: string,
-  password: string,
+  password: string | null,
   range: '24h' | '7d'
 ) {
-  return api<UserAnalyticsResponse>(`GET /user/analytics?range=${range}`, {
-    headers: { Authorization: basicAuthHeader(uuid, password) },
-  });
+  return api<UserAnalyticsResponse>(
+    `GET /user/analytics?range=${range}`,
+    configAuth(uuid, password)
+  );
 }
 
 export type LinkedAccountPlatformId = 'stremio' | 'aiomanager';
@@ -593,14 +628,11 @@ export interface LinkedAccountPushAllResult {
   error?: string;
 }
 
-type Credentials = { uuid: string; password: string };
+/** A null password means a remembered sign-in cookie carries the auth. */
+export type Credentials = { uuid: string; password: string | null };
 
 function authed(credentials: Credentials) {
-  return {
-    headers: {
-      Authorization: basicAuthHeader(credentials.uuid, credentials.password),
-    },
-  };
+  return configAuth(credentials.uuid, credentials.password);
 }
 
 export async function fetchLinkedAccountPlatforms(credentials: Credentials) {
@@ -612,6 +644,85 @@ export async function fetchLinkedAccountPlatforms(credentials: Credentials) {
 
 export async function fetchLinkedAccounts(credentials: Credentials) {
   return api<LinkedAccount[]>('GET /linked-accounts', authed(credentials));
+}
+
+// =============================================================================
+// Community sharing
+// =============================================================================
+
+export interface SubmitCommunityFormatterInput extends Record<string, unknown> {
+  name: string;
+  description: string;
+  author: string;
+  version?: string;
+  tags?: string[];
+  payload: { name: string; description: string };
+}
+
+export async function fetchCommunityItems(kind: CommunityKind) {
+  return api<CommunityItemPublic[]>(`GET /community/${kind}s`);
+}
+
+export async function fetchMyCommunityItems(credentials: Credentials) {
+  return api<CommunityItemMine[]>('GET /community/mine', authed(credentials));
+}
+
+export async function submitCommunityFormatter(
+  credentials: Credentials,
+  body: SubmitCommunityFormatterInput
+) {
+  return api<CommunityItemMine>('POST /community/formatters', {
+    ...authed(credentials),
+    body,
+  });
+}
+
+export async function submitCommunityTemplate(
+  credentials: Credentials,
+  template: unknown
+) {
+  return api<CommunityItemMine>('POST /community/templates', {
+    ...authed(credentials),
+    body: { template },
+  });
+}
+
+export async function updateCommunityItem(
+  credentials: Credentials,
+  id: string,
+  body: Record<string, unknown>
+) {
+  return api<CommunityItemMine>(
+    `PUT /community/items/${encodeURIComponent(id)}`,
+    { ...authed(credentials), body }
+  );
+}
+
+export async function withdrawCommunityDraft(
+  credentials: Credentials,
+  id: string
+) {
+  return api<CommunityItemMine>(
+    `DELETE /community/items/${encodeURIComponent(id)}/draft`,
+    authed(credentials)
+  );
+}
+
+export async function deleteCommunityItem(
+  credentials: Credentials,
+  id: string
+) {
+  return api<{ deleted: boolean }>(
+    `DELETE /community/items/${encodeURIComponent(id)}`,
+    authed(credentials)
+  );
+}
+
+export async function likeCommunityItem(credentials: Credentials, id: string) {
+  return api<{ liked: boolean; likes: number }>(
+    `POST /community/items/${encodeURIComponent(id)}/like`,
+    authed(credentials)
+  );
 }
 
 export async function probeLinkedAccount(
@@ -692,7 +803,6 @@ export type {
   UpdateUserResponse,
   ResolvePatternsResponse,
   ResolveSyncedResponse,
-  FormatStreamResponse,
   CatalogInfo,
   GDriveTokenResponse,
 };

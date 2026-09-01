@@ -44,6 +44,7 @@ import {
   updateLinkedAccount,
   type LinkedAccount,
   type LinkedAccountPlatformInfo,
+  type Credentials,
 } from '@/lib/api';
 
 function relativeTime(timestamp?: number): string {
@@ -104,7 +105,7 @@ export function LinkedAccountsSection({
     encryptedPassword: encryptedPassword ?? undefined,
   };
   const variants = userData.variants ?? [];
-  const credentials = uuid && password ? { uuid, password } : null;
+  const credentials = uuid ? { uuid, password } : null;
 
   const queryClient = useQueryClient();
   const { data: accounts, isPending } = useQuery(
@@ -253,9 +254,9 @@ function LinkedAccountCard({
   const pushed = account.lastStatus === 'ok';
 
   const [dotClass, status] = expired
-    ? ['bg-red-400', 'Sign in again']
+    ? ['bg-red-300', 'Sign in again']
     : failed
-      ? ['bg-red-400', account.lastError ?? 'Last push failed']
+      ? ['bg-red-300', account.lastError ?? 'Last push failed']
       : stale
         ? ['bg-amber-400', 'Changes not pushed']
         : pushed
@@ -323,7 +324,7 @@ interface LinkAccountModalProps {
   urlParts: UrlParts;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  credentials: { uuid: string; password: string };
+  credentials: Credentials;
   manifestUrl: string;
   onLinked: () => void;
 }
@@ -505,7 +506,7 @@ interface ManageAccountModalProps {
   urlParts: UrlParts;
   account: LinkedAccount | null;
   platform: LinkedAccountPlatformInfo | null;
-  credentials: { uuid: string; password: string };
+  credentials: Credentials;
   onClose: () => void;
   onChanged: () => void;
 }

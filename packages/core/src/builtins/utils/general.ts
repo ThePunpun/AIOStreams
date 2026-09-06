@@ -200,6 +200,60 @@ export function getTitleLanguagesForUrl(
   return specs;
 }
 
+/**
+ * Returns the title limit to use when building scrape queries for the given URL.
+ * Per-indexer overrides use the same matching priority as title languages and
+ * fall back to BUILTIN_SCRAPE_TITLE_LIMIT when no override matches.
+ */
+export function getTitleLimitForUrl(url: string, addonId?: string): number {
+  const config = appConfig.builtins.scrape.titleLimits as
+    | Record<string, number>
+    | undefined;
+
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    hostname = url;
+  }
+
+  let limit: number | undefined;
+  let source = 'global fallback';
+
+  if (config !== undefined) {
+    if (config[hostname] !== undefined) {
+      limit = config[hostname];
+      source = 'hostname match';
+    } else {
+      const indexerNames = extractIndexerNames(url);
+      const matchedIndexer = indexerNames.find(
+        (n) => config[n] !== undefined
+      );
+      if (matchedIndexer) {
+        limit = config[matchedIndexer];
+        source = `indexer name match (${matchedIndexer})`;
+      } else if (addonId && config[addonId] !== undefined) {
+        limit = config[addonId];
+        source = 'addon ID match';
+      } else if (config['*'] !== undefined) {
+        limit = config['*'];
+        source = 'wildcard (*)';
+      }
+    }
+  }
+
+  limit ??= appConfig.builtins.scrape.titleLimit;
+
+  logger.debug(`Title limit resolved`, {
+    hostname,
+    addonId,
+    limit,
+    source,
+  });
+
+  return limit;
+}
+
 export const bgRefreshCache = Cache.getInstance<string, number>(
   'builtins:bg-refresh'
 );
@@ -229,7 +283,7 @@ interface SearchWithBgRefreshOptions<T> {
  * - Caches the result (unless empty)
  * - Records the refresh timestamp
  *
- * @param options - Configuration options for the search
+ * @param options - Configuration options
  * @returns The search result (cached or fresh)
  */
 export async function searchWithBackgroundRefresh<T>(

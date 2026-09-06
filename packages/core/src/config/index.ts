@@ -33,6 +33,15 @@ import {
   sharesSchema,
   arrSchema,
 } from './schema/index.js';
+import { titleLimitsField } from './schema/title-limits.js';
+
+const builtinsSchemaWithTitleLimits = {
+  ...builtinsSchema,
+  scrape: {
+    ...builtinsSchema.scrape,
+    titleLimits: titleLimitsField,
+  },
+} as const;
 
 export const runtimeSchemas = {
   branding: brandingSchema,
@@ -50,7 +59,7 @@ export const runtimeSchemas = {
   tasks: tasksSchema,
   metadata: metadataSchema,
   presets: presetsSchema,
-  builtins: builtinsSchema,
+  builtins: builtinsSchemaWithTitleLimits,
   analytics: analyticsSchema,
   usenet: usenetSchema,
   streams: streamsSchema,

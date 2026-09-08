@@ -74,7 +74,6 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
   constructor(config: EasynewsSearchAddonConfig, clientIp?: string) {
     super(config, EasynewsSearchAddonConfigSchema, clientIp);
 
-    // Pre-encode aiostreamsAuth if provided (for static URLs)
     if (config.aiostreamsAuth) {
       this.encodedAiostreamsAuth = Buffer.from(config.aiostreamsAuth).toString(
         'base64url'
@@ -113,7 +112,6 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
   }
 
   protected async _searchNzbs(parsedId: ParsedId): Promise<NZB[]> {
-    // validate aiostreams auth if provided
     if (this.userData.aiostreamsAuth) {
       BuiltinProxy.validateAuth(this.userData.aiostreamsAuth);
     }
@@ -132,53 +130,83 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
       return [];
     }
 
-    logger.info(`Performing Easynews search`, { queries });
-
-    const searchPromises = queries.map(async (query) => {
-      const start = Date.now();
-      try {
-        const result = await this.api.search({
-          query,
-          paginate: this.userData.paginate,
-        });
-        logger.info(
-          `Easynews search for "${query}" took ${getTimeTakenSincePoint(start)}`,
-          { results: result.results.length }
-        );
-        return result;
-      } catch (error) {
-        if (error instanceof EasynewsApiError) {
-          if (error.status === 401) {
-            throw error;
-          }
-          logger.error(`Easynews API error: ${error.message}`, {
-            status: error.status,
+    const runQueries = async (queryList: string[]) => {
+      logger.info(`Performing Easynews search`, { queries: queryList });
+      const searchPromises = queryList.map(async (query) => {
+        const start = Date.now();
+        try {
+          const result = await this.api.search({
+            query,
+            paginate: this.userData.paginate,
           });
-        } else {
-          logger.error(
-            `Easynews search error: ${error instanceof Error ? error.message : String(error)}`
+          logger.info(
+            `Easynews search for "${query}" took ${getTimeTakenSincePoint(start)}`,
+            { results: result.results.length }
           );
+          return result;
+        } catch (error) {
+          if (error instanceof EasynewsApiError) {
+            if (error.status === 401) {
+              throw error;
+            }
+            logger.error(`Easynews API error: ${error.message}`, {
+              status: error.status,
+            });
+          } else {
+            logger.error(
+              `Easynews search error: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+          return null;
         }
-        return null;
-      }
-    });
+      });
 
-    const allResults = await Promise.all(searchPromises);
+      return (await Promise.all(searchPromises)).filter(
+        (r): r is EasynewsSearchResult => r !== null
+      );
+    };
 
-    const validResults = allResults.filter(
-      (r): r is EasynewsSearchResult => r !== null
-    );
-
+    const validResults = await runQueries(queries);
     if (validResults.length === 0) {
       return [];
     }
 
-    // use download info from first successful result
-    const downloadInfo = validResults[0].downloadInfo;
+    const resultItems = validResults.flatMap((r) => r.results);
+    const uniqueInitialCount = new Set(resultItems.map((item) => item.hash)).size;
+    const yearlessFallback = appConfig.builtins.scrape.yearlessMovieFallback;
 
+    if (
+      parsedId.mediaType === 'movie' &&
+      metadata.year &&
+      yearlessFallback.enabled &&
+      uniqueInitialCount < yearlessFallback.resultThreshold
+    ) {
+      const yearSuffix = ` ${metadata.year}`;
+      const yearlessQueries = [
+        ...new Set(
+          queries
+            .filter((query) => query.endsWith(yearSuffix))
+            .map((query) => query.slice(0, -yearSuffix.length).trim())
+            .filter(Boolean)
+        ),
+      ].filter((query) => !queries.includes(query));
+
+      if (yearlessQueries.length > 0) {
+        logger.info(
+          'Year-constrained Easynews movie search returned too few unique results; retrying without year',
+          {
+            uniqueResults: uniqueInitialCount,
+            threshold: yearlessFallback.resultThreshold,
+            queries: yearlessQueries,
+          }
+        );
+        validResults.push(...(await runQueries(yearlessQueries)));
+      }
+    }
+
+    const downloadInfo = validResults[0].downloadInfo;
     const items = validResults.flatMap((r) => r.results);
 
-    // Deduplicate by hash
     const seenHashes = new Set<string>();
     const uniqueItems: EasynewsSearchItem[] = [];
     for (const item of items) {
@@ -188,7 +216,6 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
       }
     }
 
-    // convert to NZB format
     const nzbs: NZB[] = uniqueItems.map((item) => {
       const nzbUrl = this.api.generateNzbUrl(
         item,
@@ -230,9 +257,6 @@ export class EasynewsSearchAddon extends BaseDebridAddon<EasynewsSearchAddonConf
     return nzbs;
   }
 
-  /**
-   * Search for torrents - not applicable for Easynews
-   */
   protected async _searchTorrents(parsedId: ParsedId): Promise<Torrent[]> {
     return [];
   }

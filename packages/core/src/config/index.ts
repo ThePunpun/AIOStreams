@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { bootstrap, BootstrapConfig } from './bootstrap.js';
 import { TaskManager } from '../tasks/index.js';
 import { setLogLevel, setLogFormat } from '../logging/logger.js';
@@ -34,6 +35,35 @@ import {
   arrSchema,
 } from './schema/index.js';
 
+const builtinsSchemaWithYearlessMovieFallback = {
+  ...builtinsSchema,
+  scrape: {
+    ...builtinsSchema.scrape,
+    yearlessMovieFallback: {
+      enabled: {
+        schema: z.boolean(),
+        default: false,
+        label: 'Yearless movie fallback',
+        description:
+          'Retry text-based movie searches without the year when the initial year-constrained search returns too few unique results. This can recover releases that omit the year, but may increase API usage and return broader results.',
+        env: 'BUILTIN_SCRAPE_YEARLESS_MOVIE_FALLBACK_ENABLED',
+        requiresRestart: false,
+        secret: false,
+      },
+      resultThreshold: {
+        schema: z.number().int().positive(),
+        default: 3,
+        label: 'Yearless fallback result threshold',
+        description:
+          "Run the yearless fallback when an addon's initial year-constrained movie search returns fewer than this many unique results. Evaluated separately for each addon/indexer search.",
+        env: 'BUILTIN_SCRAPE_YEARLESS_MOVIE_FALLBACK_RESULT_THRESHOLD',
+        requiresRestart: false,
+        secret: false,
+      },
+    },
+  },
+} as const;
+
 export const runtimeSchemas = {
   branding: brandingSchema,
   templates: templatesSchema,
@@ -50,7 +80,7 @@ export const runtimeSchemas = {
   tasks: tasksSchema,
   metadata: metadataSchema,
   presets: presetsSchema,
-  builtins: builtinsSchema,
+  builtins: builtinsSchemaWithYearlessMovieFallback,
   analytics: analyticsSchema,
   usenet: usenetSchema,
   streams: streamsSchema,

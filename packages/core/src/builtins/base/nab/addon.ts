@@ -127,7 +127,6 @@ export abstract class BaseNabAddon<
 
     if (this.userData.forceQuerySearch) {
     } else if (
-      // prefer tvdb ID over imdb ID for series
       parsedId.mediaType === 'series' &&
       searchCapabilities.supportedParams.includes('tvdbid') &&
       metadata.tvdbId
@@ -175,19 +174,14 @@ export abstract class BaseNabAddon<
     )
       queryParams.year = metadata.year.toString();
 
-    // date-based shows: numeric season/ep params return nothing, the Sonarr
-    // daily convention (season=YYYY&ep=MM/DD) is what indexers understand
     const isDailySearch =
       parsedId.mediaType === 'series' &&
       metadata.isDateBased &&
       metadata.episodeAirDate &&
       queryParams.season !== undefined &&
       queryParams.ep !== undefined;
-    // preserve the numeric season/ep so we can fall back to them if the daily
-    // search misses
     let numericFallbackParams: Record<string, string> | undefined;
     if (isDailySearch) {
-      // queryParams still holds the numeric season/ep here
       numericFallbackParams = { ...queryParams };
       const [yyyy, mm, dd] = metadata.episodeAirDate!.split('-');
       queryParams.season = yyyy;
@@ -228,10 +222,7 @@ export abstract class BaseNabAddon<
       metadata.primaryTitle
     ) {
       queries = this.buildQueries(parsedId, metadata, {
-        // add year if it is not already in the query params
         addYear: !queryParams.year,
-        // add season and episode if they are not already in the query params
-        // some endpoints won't return results with season/ep in query
         addSeasonEpisode: forceIncludeSeasonEpInParams.includes(
           capabilities.server.title || ''
         )
@@ -243,10 +234,13 @@ export abstract class BaseNabAddon<
     }
     let results: SearchResultItem<A['namespace']>[] = [];
     if (queries.length > 0) {
-      const runQueries = (params: Record<string, string>) => {
-        this.logger.debug('Performing queries', { queries });
+      const runQueries = (
+        params: Record<string, string>,
+        queryList: string[] = queries
+      ) => {
+        this.logger.debug('Performing queries', { queries: queryList });
         return Promise.all(
-          queries.map((q) =>
+          queryList.map((q) =>
             queryLimit(() =>
               this.fetchResults(searchFunction, { ...params, q })
             )
@@ -261,6 +255,48 @@ export abstract class BaseNabAddon<
           { season: queryParams.season, episode: queryParams.ep }
         );
         results = await runQueries(fallbackParams);
+      }
+
+      const yearlessFallback = appConfig.builtins.scrape.yearlessMovieFallback;
+      if (
+        parsedId.mediaType === 'movie' &&
+        metadata.year &&
+        yearlessFallback.enabled
+      ) {
+        const resultIdentity = (r: SearchResultItem<A['namespace']>) =>
+          r.guid ?? r.enclosure?.[0]?.url ?? r.link ?? r.title;
+        const uniqueCount = new Set(results.map(resultIdentity)).size;
+        if (uniqueCount < yearlessFallback.resultThreshold) {
+          let yearlessParams = primaryParams;
+          let yearlessQueries = queries;
+
+          if (primaryParams.year) {
+            const { year: _year, ...paramsWithoutYear } = primaryParams;
+            yearlessParams = paramsWithoutYear;
+          } else {
+            const yearSuffix = ` ${metadata.year}`;
+            yearlessQueries = [
+              ...new Set(
+                queries
+                  .filter((q) => q.endsWith(yearSuffix))
+                  .map((q) => q.slice(0, -yearSuffix.length).trim())
+                  .filter(Boolean)
+              ),
+            ].filter((q) => !queries.includes(q));
+          }
+
+          if (yearlessQueries.length > 0) {
+            this.logger.info(
+              'Year-constrained movie search returned too few unique results; retrying without year',
+              {
+                uniqueResults: uniqueCount,
+                threshold: yearlessFallback.resultThreshold,
+                queries: yearlessQueries,
+              }
+            );
+            results.push(...(await runQueries(yearlessParams, yearlessQueries)));
+          }
+        }
       }
     } else {
       results = await this.fetchResults(searchFunction, primaryParams);
@@ -299,7 +335,7 @@ export abstract class BaseNabAddon<
       }
     );
     return {
-      results: results,
+      results,
       meta: {
         searchType,
         capabilities,
@@ -316,7 +352,6 @@ export abstract class BaseNabAddon<
       `Available search functions: ${JSON.stringify(available)}`
     );
     if (this.userData.forceQuerySearch) {
-      // dont use specific search functions when force query search is enabled
     } else if (type === 'movie') {
       const movieSearch = available.find((s) =>
         s.toLowerCase().includes('movie')
@@ -359,7 +394,6 @@ export abstract class BaseNabAddon<
     const identity = (r: SearchResultItem<A['namespace']>): string =>
       r.guid ?? r.enclosure?.[0]?.url ?? r.link ?? r.title;
 
-    // if both first and last items are duplicates, the page is likely a duplicate
     const areResultsDuplicate = (
       existing: SearchResultItem<A['namespace']>[],
       newResults: SearchResultItem<A['namespace']>[]
@@ -390,11 +424,10 @@ export abstract class BaseNabAddon<
       const total = initialResponse.total;
       const initialOffset = initialResponse.offset || 0;
 
-      // Calculate how many more pages we need
       const remainingResults = total - (initialOffset + limit);
       if (remainingResults > 0) {
         const additionalPages = Math.ceil(remainingResults / limit);
-        const pagesToFetch = Math.min(additionalPages, maxPages - 1); // -1 because we already fetched first page
+        const pagesToFetch = Math.min(additionalPages, maxPages - 1);
 
         if (pagesToFetch > 0) {
           this.logger.debug('Fetching additional pages with known total', {
@@ -404,7 +437,6 @@ export abstract class BaseNabAddon<
             remainingResults,
           });
 
-          // Create requests for all remaining pages in parallel
           const pagePromises = Array.from({ length: pagesToFetch }, (_, i) => {
             const offset = initialOffset + limit * (i + 1);
             return queryLimit(
@@ -429,7 +461,6 @@ export abstract class BaseNabAddon<
         }
       }
     } else {
-      // keep fetching until we get empty results or hit max pages
       let pageCount = 1;
       let currentOffset =
         (initialResponse.offset || 0) + initialResponse.results.length;
@@ -474,7 +505,6 @@ export abstract class BaseNabAddon<
           totalResults: allResults.length,
         });
 
-        // if this page returned less results than the limit, we can assume there are no more pages
         if (response.results.length < limit) {
           this.logger.debug(
             'Received less results than limit, assuming last page'

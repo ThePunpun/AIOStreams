@@ -53,17 +53,12 @@ export class KnabenAddon extends BaseDebridAddon<KnabenAddonConfig> {
     const queryLimit = createQueryLimit();
     let categories: number[] = [];
     const metadata = await this.getSearchMetadata();
-    if (!metadata.primaryTitle) {
-      return [];
-    }
+    if (!metadata.primaryTitle) return [];
 
     const queries = this.buildQueries(parsedId, metadata, {
       titleLanguages: getTitleLanguagesForUrl(knabenApiUrl, this.id),
     });
-
-    if (queries.length === 0) {
-      return [];
-    }
+    if (queries.length === 0) return [];
 
     categories = [
       ...(parsedId.mediaType === 'movie' ? [KnabenCategory.Movies] : []),
@@ -73,36 +68,70 @@ export class KnabenAddon extends BaseDebridAddon<KnabenAddonConfig> {
       ...(metadata.isAnime ? [KnabenCategory.Anime] : []),
     ];
 
-    logger.info(`Performing knaben search`, { queries, categories });
-
-    const searchPromises = queries.map((q) =>
-      queryLimit(async () => {
-        const start = Date.now();
-        const { hits } = await this.api.search({
-          query: q,
-          categories,
-          size: 300,
-          hideUnsafe: false,
-        });
-        logger.info(
-          `Knaben search for ${q} took ${getTimeTakenSincePoint(start)}`,
-          {
-            results: hits.length,
-          }
-        );
-        return hits;
-      })
-    );
-
-    const allResults = await Promise.all(searchPromises);
-    const hits = allResults
-      .flat()
-      .filter(
-        (hit) =>
-          !BLACKLISTED_CATEGORIES.some((category) =>
-            hit.categoryId.includes(category)
+    const runQueries = async (queryList: string[]) => {
+      logger.info(`Performing knaben search`, { queries: queryList, categories });
+      return (
+        await Promise.all(
+          queryList.map((q) =>
+            queryLimit(async () => {
+              const start = Date.now();
+              const { hits } = await this.api.search({
+                query: q,
+                categories,
+                size: 300,
+                hideUnsafe: false,
+              });
+              logger.info(
+                `Knaben search for ${q} took ${getTimeTakenSincePoint(start)}`,
+                { results: hits.length }
+              );
+              return hits;
+            })
           )
-      );
+        )
+      ).flat();
+    };
+
+    let hits = await runQueries(queries);
+    const yearlessFallback = appConfig.builtins.scrape.yearlessMovieFallback;
+    if (
+      parsedId.mediaType === 'movie' &&
+      metadata.year &&
+      yearlessFallback.enabled
+    ) {
+      const identity = (hit: (typeof hits)[number]) =>
+        hit.hash ?? hit.link ?? hit.magnetUrl ?? hit.title;
+      const uniqueCount = new Set(hits.map(identity)).size;
+      if (uniqueCount < yearlessFallback.resultThreshold) {
+        const yearSuffix = ` ${metadata.year}`;
+        const yearlessQueries = [
+          ...new Set(
+            queries
+              .filter((q) => q.endsWith(yearSuffix))
+              .map((q) => q.slice(0, -yearSuffix.length).trim())
+              .filter(Boolean)
+          ),
+        ];
+        if (yearlessQueries.length > 0) {
+          logger.info(
+            'Year-constrained Knaben movie search returned too few unique results; retrying without year',
+            {
+              uniqueResults: uniqueCount,
+              threshold: yearlessFallback.resultThreshold,
+              queries: yearlessQueries,
+            }
+          );
+          hits.push(...(await runQueries(yearlessQueries)));
+        }
+      }
+    }
+
+    hits = hits.filter(
+      (hit) =>
+        !BLACKLISTED_CATEGORIES.some((category) =>
+          hit.categoryId.includes(category)
+        )
+    );
 
     const seenTorrents = new Set<string>();
     const torrents: UnprocessedTorrent[] = [];
@@ -120,13 +149,11 @@ export class KnabenAddon extends BaseDebridAddon<KnabenAddonConfig> {
       if (!hash && hit.link && !appConfig.builtins.knaben.downloadTorrents) {
         continue;
       }
-      if (seenTorrents.has(hash ?? hit.link ?? '')) {
-        continue;
-      }
+      if (seenTorrents.has(hash ?? hit.link ?? '')) continue;
+      seenTorrents.add(hash ?? hit.link ?? '');
+
       let sources: string[] = [];
-      if (hit.magnetUrl) {
-        sources = extractTrackersFromMagnet(hit.magnetUrl);
-      }
+      if (hit.magnetUrl) sources = extractTrackersFromMagnet(hit.magnetUrl);
       let age = undefined;
       if (hit.lastSeen) {
         const lastSeenDate = new Date(hit.lastSeen);

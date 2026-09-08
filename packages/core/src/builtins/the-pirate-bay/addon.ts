@@ -1,6 +1,7 @@
 import { BaseDebridAddon, BaseDebridConfigSchema } from '../base/debrid.js';
 import { z } from 'zod';
 import { createLogger, ParsedId } from '../../utils/index.js';
+import { config as appConfig } from '../../config/index.js';
 import ThePirateBayAPI, { getThePirateBayUrl } from './api.js';
 import { NZB, UnprocessedTorrent } from '../../debrid/utils.js';
 import { validateInfoHash } from '../utils/debrid.js';
@@ -35,34 +36,65 @@ export class ThePirateBayAddon extends BaseDebridAddon<ThePirateBayAddonConfig> 
   ): Promise<UnprocessedTorrent[]> {
     const queryLimit = createQueryLimit();
     const metadata = await this.getSearchMetadata();
-    if (!metadata.primaryTitle) {
-      return [];
-    }
+    if (!metadata.primaryTitle) return [];
 
-    const queries = this.buildQueries(parsedId, metadata, {
+    const titleQueries = this.buildQueries(parsedId, metadata, {
       titleLanguages: getTitleLanguagesForUrl(getThePirateBayUrl(), this.id),
     });
-    if (metadata.imdbId) {
-      queries.push(metadata.imdbId);
+    if (titleQueries.length === 0 && !metadata.imdbId) return [];
+
+    const runQueries = async (queryList: string[]) =>
+      (
+        await Promise.all(
+          queryList.map((q) => queryLimit(() => this.api.search(q)))
+        )
+      ).flat();
+
+    logger.info(`Performing The Pirate Bay search`, { queries: titleQueries });
+    let titleResults = await runQueries(titleQueries);
+
+    const yearlessFallback = appConfig.builtins.scrape.yearlessMovieFallback;
+    if (
+      parsedId.mediaType === 'movie' &&
+      metadata.year &&
+      yearlessFallback.enabled
+    ) {
+      const uniqueCount = new Set(
+        titleResults.map((result) => result.hash ?? result.name)
+      ).size;
+      if (uniqueCount < yearlessFallback.resultThreshold) {
+        const yearSuffix = ` ${metadata.year}`;
+        const yearlessQueries = [
+          ...new Set(
+            titleQueries
+              .filter((q) => q.endsWith(yearSuffix))
+              .map((q) => q.slice(0, -yearSuffix.length).trim())
+              .filter(Boolean)
+          ),
+        ];
+        if (yearlessQueries.length > 0) {
+          logger.info(
+            'Year-constrained The Pirate Bay movie search returned too few unique results; retrying without year',
+            {
+              uniqueResults: uniqueCount,
+              threshold: yearlessFallback.resultThreshold,
+              queries: yearlessQueries,
+            }
+          );
+          titleResults.push(...(await runQueries(yearlessQueries)));
+        }
+      }
     }
 
-    if (queries.length === 0) {
-      return [];
-    }
-
-    logger.info(`Performing The Pirate Bay search`, { queries });
-
-    const searchPromises = queries.map((q) =>
-      queryLimit(() => this.api.search(q))
+    const imdbResults = metadata.imdbId
+      ? await runQueries([metadata.imdbId])
+      : [];
+    const allResults = [...titleResults, ...imdbResults].filter(
+      (result) =>
+        !result.imdbId ||
+        !metadata.imdbId ||
+        result.imdbId === metadata.imdbId
     );
-    const allResults = (await Promise.all(searchPromises))
-      .flat()
-      .filter(
-        (result) =>
-          !result.imdbId ||
-          !metadata.imdbId ||
-          result.imdbId === metadata.imdbId
-      );
 
     const seenTorrents = new Set<string>();
     const torrents: UnprocessedTorrent[] = [];
@@ -74,9 +106,7 @@ export class ThePirateBayAddon extends BaseDebridAddon<ThePirateBayAddonConfig> 
         );
         continue;
       }
-      if (seenTorrents.has(hash)) {
-        continue;
-      }
+      if (seenTorrents.has(hash)) continue;
       seenTorrents.add(hash);
 
       const age = Math.ceil(

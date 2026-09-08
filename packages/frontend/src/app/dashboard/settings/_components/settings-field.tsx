@@ -182,6 +182,11 @@ function SettingsFieldControl({ k }: { k: SettingsKey }) {
           label={labelNode as unknown as string}
           help={md(help)}
           disabled={disabled}
+          fieldLabelClass={
+            k.key === 'builtins.scrape.yearlessMovieFallback.resultThreshold'
+              ? 'text-sm'
+              : undefined
+          }
           min={k.ui.min}
           max={k.ui.max}
           step={k.ui.step}

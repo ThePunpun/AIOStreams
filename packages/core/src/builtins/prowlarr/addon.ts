@@ -81,13 +81,6 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
         );
         return false;
       }
-      // if (indexer.protocol !== 'torrent') {
-      //   filterReasons.set(
-      //     'not torrent protocol',
-      //     (filterReasons.get('not torrent protocol') ?? 0) + 1
-      //   );
-      //   return false;
-      // }
       if (appConfig.builtins.prowlarr.indexers?.length) {
         if (
           ![
@@ -121,9 +114,6 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
     }
   }
 
-  /**
-   * Get indexers filtered by protocol (torrent or usenet)
-   */
   private async getIndexersByProtocol(
     protocol: 'torrent' | 'usenet'
   ): Promise<ProwlarrApiIndexer[]> {
@@ -171,29 +161,18 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
     this.logger.info(
       `Chosen ${protocol} indexers: ${chosenIndexers.map((indexer) => indexer.name).join(', ')}`
     );
-
     return chosenIndexers;
   }
 
-  /**
-   * Common search method that performs the actual Prowlarr API search
-   * @param protocol - The protocol type ('torrent' or 'usenet')
-   * @param parsedId - The parsed content ID
-   * @param metadata - Search metadata
-   * @returns Array of search results from Prowlarr
-   */
   private async performSearch(
     protocol: 'torrent' | 'usenet',
     parsedId: ParsedId,
     metadata: SearchMetadata
   ): Promise<ProwlarrApiSearchItem[]> {
-    if (this.sources.length > 0 && !this.sources.includes(protocol)) {
-      return [];
-    }
+    if (this.sources.length > 0 && !this.sources.includes(protocol)) return [];
 
     const queryLimit = createQueryLimit();
     const chosenIndexers = await this.getIndexersByProtocol(protocol);
-
     if (chosenIndexers.length === 0) {
       this.logger.warn(`No ${protocol} indexers available`);
       return [];
@@ -202,30 +181,64 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
     const queries = this.buildQueries(parsedId, metadata, {
       titleLanguages: getTitleLanguagesForUrl(this.userData.url, this.id),
     });
-    if (queries.length === 0) {
-      return [];
-    }
+    if (queries.length === 0) return [];
 
-    const searchPromises = queries.map((q) =>
-      queryLimit(async () => {
-        const start = Date.now();
-        const { data } = await this.api.search({
-          query: q,
-          indexerIds: chosenIndexers.map((indexer) => indexer.id),
-          type: 'search',
-          limit: 2000,
-        });
-        this.logger.info(
-          `Prowlarr ${protocol} search for ${q} took ${getTimeTakenSincePoint(start)}`,
-          {
-            results: data.length,
-          }
-        );
-        return data;
-      })
-    );
-    const allResults = await Promise.all(searchPromises);
-    return allResults.flat();
+    const runQueries = async (queryList: string[]) =>
+      (
+        await Promise.all(
+          queryList.map((q) =>
+            queryLimit(async () => {
+              const start = Date.now();
+              const { data } = await this.api.search({
+                query: q,
+                indexerIds: chosenIndexers.map((indexer) => indexer.id),
+                type: 'search',
+                limit: 2000,
+              });
+              this.logger.info(
+                `Prowlarr ${protocol} search for ${q} took ${getTimeTakenSincePoint(start)}`,
+                { results: data.length }
+              );
+              return data;
+            })
+          )
+        )
+      ).flat();
+
+    let results = await runQueries(queries);
+    const yearlessFallback = appConfig.builtins.scrape.yearlessMovieFallback;
+    if (
+      parsedId.mediaType === 'movie' &&
+      metadata.year &&
+      yearlessFallback.enabled
+    ) {
+      const identity = (result: ProwlarrApiSearchItem) =>
+        result.infoHash ?? result.downloadUrl ?? result.guid ?? result.title;
+      const uniqueCount = new Set(results.map(identity)).size;
+      if (uniqueCount < yearlessFallback.resultThreshold) {
+        const yearSuffix = ` ${metadata.year}`;
+        const yearlessQueries = [
+          ...new Set(
+            queries
+              .filter((q) => q.endsWith(yearSuffix))
+              .map((q) => q.slice(0, -yearSuffix.length).trim())
+              .filter(Boolean)
+          ),
+        ];
+        if (yearlessQueries.length > 0) {
+          this.logger.info(
+            `Year-constrained Prowlarr ${protocol} movie search returned too few unique results; retrying without year`,
+            {
+              uniqueResults: uniqueCount,
+              threshold: yearlessFallback.resultThreshold,
+              queries: yearlessQueries,
+            }
+          );
+          results.push(...(await runQueries(yearlessQueries)));
+        }
+      }
+    }
+    return results;
   }
 
   protected async _searchTorrents(
@@ -237,7 +250,6 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
 
     const seenTorrents = new Set<string>();
     const torrents: UnprocessedTorrent[] = [];
-
     for (const result of results) {
       const magnetUrl = result.guid?.includes('magnet:')
         ? result.guid
@@ -256,7 +268,7 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
       torrents.push({
         hash: infoHash,
         guid: result.guid,
-        downloadUrl: downloadUrl,
+        downloadUrl,
         sources: magnetUrl ? extractTrackersFromMagnet(magnetUrl) : [],
         seeders: result.seeders,
         title: result.title,
@@ -275,7 +287,6 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
 
     const seenNzbs = new Set<string>();
     const nzbs: NZB[] = [];
-
     for (const result of results) {
       const nzbUrl = result.downloadUrl ?? result.guid;
       if (!nzbUrl) continue;
@@ -283,7 +294,6 @@ export class ProwlarrAddon extends BaseDebridAddon<ProwlarrAddonConfig> {
       seenNzbs.add(nzbUrl);
 
       const hash = hashNzbUrl(nzbUrl);
-
       nzbs.push({
         hash,
         nzb: nzbUrl,

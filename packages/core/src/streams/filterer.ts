@@ -776,7 +776,7 @@ class StreamFilterer {
     };
 
     // undefined = cannot judge (nothing usable parsed, or no expected titles)
-    const episodeTitleMatches = (
+    const evaluateEpisodeTitleMatch = (
       stream: ParsedStream,
       threshold: number
     ): boolean | undefined => {
@@ -809,6 +809,58 @@ class StreamFilterer {
         return undefined;
       }
       return false;
+    };
+
+    // Temporary diagnostics for the independent episode-title investigation.
+    logger.debug('Episode title diagnostics v1: request', {
+      id,
+      type,
+      isAnime,
+      season: parsedId?.season ?? null,
+      episode: parsedId?.episode ?? null,
+      expectedTitles: requestedMetadata?.episodeTitles ?? [],
+      absoluteEpisode: requestedMetadata?.absoluteEpisode ?? null,
+      relativeAbsoluteEpisode:
+        requestedMetadata?.relativeAbsoluteEpisode ?? null,
+      enabled: this.userData.episodeTitleMatching?.enabled ?? false,
+      threshold: this.userData.episodeTitleMatching?.similarityThreshold ?? 0.8,
+      requestTypes: this.userData.episodeTitleMatching?.requestTypes ?? [],
+      addons: this.userData.episodeTitleMatching?.addons ?? [],
+    });
+    for (const stream of streams) {
+      logger.debug('Episode title diagnostics v1: candidate', {
+        id,
+        filename: stream.filename ?? null,
+        folderName: stream.folderName ?? null,
+        addon: stream.addon?.preset?.id ?? null,
+        parsedTitle: stream.parsedFile?.title ?? null,
+        parsedEpisodeTitle: stream.parsedFile?.episodeTitle ?? null,
+        seasons: stream.parsedFile?.seasons ?? [],
+        episodes: stream.parsedFile?.episodes ?? [],
+        languages: stream.parsedFile?.languages ?? [],
+      });
+    }
+    const episodeTitleMatches = (
+      stream: ParsedStream,
+      threshold: number,
+      source = 'series-title-identity'
+    ): boolean | undefined => {
+      const result = evaluateEpisodeTitleMatch(stream, threshold);
+      logger.debug('Episode title diagnostics v1: verdict', {
+        id,
+        source,
+        threshold,
+        filename: stream.filename ?? null,
+        parsedEpisodeTitle: stream.parsedFile?.episodeTitle ?? null,
+        normalisedEpisodeTitle: stream.parsedFile?.episodeTitle
+          ? normaliseTitle(stream.parsedFile.episodeTitle)
+          : null,
+        expectedTitles: requestedMetadata?.episodeTitles ?? [],
+        languages: stream.parsedFile?.languages ?? [],
+        verdict:
+          result === undefined ? 'inconclusive' : result ? 'match' : 'mismatch',
+      });
+      return result;
     };
 
     const performTitleMatch = (stream: ParsedStream) => {
@@ -967,7 +1019,8 @@ class StreamFilterer {
       return (
         episodeTitleMatches(
           stream,
-          episodeTitleMatchingOptions.similarityThreshold
+          episodeTitleMatchingOptions.similarityThreshold,
+          'episode-title-filter'
         ) !== false
       );
     };

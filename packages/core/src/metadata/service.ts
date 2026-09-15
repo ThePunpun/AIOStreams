@@ -66,7 +66,7 @@ export class MetadataService {
     return withRetry(
       async () => {
         const { result } = await this.lock.withLock(
-          `metadata:${id.mediaType}:${id.type}:${id.value}:${id.season ?? ''}:${id.episode ?? ''}${this.config.tmdbAccessToken || this.config.tmdbApiKey ? ':tmdb' : ''}${this.config.tvdbApiKey ? ':tvdb' : ''}`,
+          `metadata:${id.mediaType}:${id.type}:${id.value}:${id.season ?? ''}:${id.episode ?? ''}${this.config.tmdbAccessToken || this.config.tmdbApiKey ? ':tmdb' : ''}${this.config.tvdbApiKey ? ':tvdb' : ''}:episode-title-diagnostics-v1`,
           async () => {
             const start = Date.now();
             // fill order is irrelevant; merge.ts decides what wins
@@ -364,6 +364,24 @@ export class MetadataService {
                   const n = (video as { number?: unknown }).number;
                   return typeof n === 'number' ? n : undefined;
                 };
+                logger.debug('Episode title diagnostics v1: cinemeta source', {
+                  id: id.fullId,
+                  requestedSeason: id.season,
+                  requestedEpisode: id.episode,
+                  videos: cinemetaData.videos
+                    .filter(
+                      (video) =>
+                        video.season === Number(id.season) &&
+                        episodeIndex(video) === Number(id.episode)
+                    )
+                    .map((video) => ({
+                      season: video.season,
+                      episode: episodeIndex(video),
+                      title: video.title,
+                      name: video.name,
+                      released: video.released,
+                    })),
+                });
                 cinemetaVideos = cinemetaData.videos.map((video) => ({
                   season: video.season,
                   episode: episodeIndex(video),
@@ -729,6 +747,44 @@ export class MetadataService {
                   }
                 }
               }
+              logger.debug('Episode title diagnostics v1: metadata sources', {
+                id: id.fullId,
+                requestProvider: id.type,
+                requestedSeason: id.season,
+                requestedEpisode: id.episode,
+                tvdbId: merged.tvdbId,
+                tmdbId: merged.tmdbId,
+                tvdbCoordinates: {
+                  season: seasonNumber,
+                  episode: episodeNumber,
+                },
+                tmdbCoordinates: mapEpisodeForTmdb(),
+                cinemetaReleased,
+                referenceAirDate,
+                sources: [
+                  {
+                    provider: 'tmdb',
+                    status: tmdbEpisode.status,
+                    episode: tmdbEp,
+                  },
+                  {
+                    provider: 'tvdb',
+                    status: tvdbEpisodes.status,
+                    episode: tvdbEp,
+                  },
+                  {
+                    provider: 'skyhook',
+                    status: skyhookShow.status,
+                    episode: skyhookEp,
+                  },
+                ].map((source) => ({
+                  ...source,
+                  acceptedByDate: source.episode
+                    ? agreesWithRequest(source.episode.airDate)
+                    : false,
+                })),
+                selectedTitles: names,
+              });
               if (names.length) episodeTitles = deduplicateTitles(names);
             }
 

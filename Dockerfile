@@ -45,6 +45,8 @@ COPY packages/crypto ./packages/crypto
 COPY scripts ./scripts
 COPY resources ./resources
 
+# CUSTOM-ONLY: Generate build metadata for punpun-custom; preserve during upstream syncs.
+RUN node -e "const fs=require('fs'); const p=require('./package.json'); const metadata={version:p.version,description:p.description,tag:'punpun-custom',channel:'dev',commitHash:'unknown',buildTime:new Date().toISOString(),commitTime:'unknown'}; fs.mkdirSync('resources',{recursive:true}); fs.writeFileSync('resources/metadata.json',JSON.stringify(metadata,null,2)); console.log('Version info generated:',metadata);"
 
 # Build the project.
 RUN pnpm run build

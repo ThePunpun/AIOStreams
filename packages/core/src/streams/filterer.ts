@@ -28,6 +28,7 @@ import {
 } from '../parser/utils.js';
 import { reconcileEpisodeFilename } from '../parser/episode-filename.js';
 import { normaliseCountryCode } from '../utils/countries.js';
+import { withoutSeriesSubtitle } from '../parser/episode-title.js';
 import { partial_ratio } from 'fuzzball';
 import { formatBitrate, formatBytes } from '../formatters/utils.js';
 import { iso6391ToLanguage, languageToCode } from '../utils/languages.js';
@@ -1192,6 +1193,18 @@ class StreamFilterer {
         );
         if (withoutLabel !== parsedEpisodeTitle) {
           result = titleMatchWithLang(normaliseTitle(withoutLabel), expected, {
+            threshold,
+          });
+        }
+      }
+      if (!result.matched) {
+        const episodeTitle = withoutSeriesSubtitle(
+          parsedEpisodeTitle,
+          stream.parsedFile?.title,
+          requestedMetadata?.titles ?? []
+        );
+        if (episodeTitle !== parsedEpisodeTitle) {
+          result = titleMatchWithLang(normaliseTitle(episodeTitle), expected, {
             threshold,
           });
         }

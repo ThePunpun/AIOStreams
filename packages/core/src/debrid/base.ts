@@ -220,6 +220,8 @@ const TitleMetadataSchema = z.object({
   tvdbEpisode: z.number().optional(),
   // Selected anime-entry aliases used to resolve bare entry-relative episode filenames.
   animeEntryTitles: z.array(z.string()).optional(),
+  // Verified part titles for translated local episode numbers.
+  localEpisodeTitles: z.array(z.string()).optional(),
   // local air dates ('YYYY-MM-DD') of the requested episode for date-based shows
   airDates: z.array(z.string()).optional(),
   isDateBased: z.boolean().optional(),

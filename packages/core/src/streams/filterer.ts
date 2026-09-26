@@ -1,6 +1,7 @@
 import { ParsedStream, UserData } from '../db/schemas.js';
 import {
   createLogger,
+  appConfig,
   RegexAccess,
   getTimeTakenSincePoint,
   formatMilliseconds,
@@ -25,16 +26,35 @@ import {
   reconcileBareAnimeEpisode,
   titleMatchWithLang,
 } from '../parser/utils.js';
+import { reconcileEpisodeFilename } from '../parser/episode-filename.js';
 import { normaliseCountryCode } from '../utils/countries.js';
 import { partial_ratio } from 'fuzzball';
 import { formatBitrate, formatBytes } from '../formatters/utils.js';
 import { iso6391ToLanguage, languageToCode } from '../utils/languages.js';
 import { ReleaseDate } from '../metadata/tmdb.js';
+import { TMDBMetadata } from '../metadata/tmdb.js';
+import { TVDBMetadata } from '../metadata/tvdb.js';
 import { StreamContext, ExtendedMetadata } from './context.js';
 import {
   getAnimeSeasonEpisodeMapping,
   reconcileAnimeSeasonEpisode,
 } from '../parser/anime-season-episode.js';
+
+import {
+  getStreamTitleConflicts,
+  confirmsTitleIdentity,
+  getShowIdentityEpisodeTitles,
+  isDistinctiveEpisodeTitle,
+  showIdentityEpisodeTitleKey,
+} from './title-conflicts.js';
+import type { TitleConflict } from '../metadata/utils.js';
+import { isCombinedEpisodeVideo } from './combined-episode-video.js';
+import {
+  matchingReleaseEpisodeFloor,
+  matchingReleaseSeason,
+  type ConflictNumberingBounds,
+  getConflictNumberingBounds,
+} from './title-conflict-episodes.js';
 
 const logger = createLogger('filterer');
 
@@ -392,6 +412,10 @@ class StreamFilterer {
     return { filterDetails, includedDetails };
   }
 
+  /**
+   * Apply configured stream filters using request metadata, including
+   * alias-specific identity checks when ambiguous results are discarded.
+   */
   public async filter(
     streams: ParsedStream[],
     context: StreamContext
@@ -501,7 +525,18 @@ class StreamFilterer {
           await new Promise((resolve) => setImmediate(resolve));
           reconcileSliceStart = performance.now();
         }
-        if (!stream.parsedFile?.title) continue;
+        if (!stream.parsedFile) continue;
+        if (type === 'series') {
+          const recovered = reconcileEpisodeFilename(
+            stream.parsedFile,
+            stream.filename,
+            stream.folderName,
+            requestedTitleStrings
+          );
+          if (recovered !== stream.parsedFile) {
+            stream.parsedFile = recovered;
+          }
+        }
         const reconciled = reconcileParsedName(
           stream.parsedFile,
           [stream.filename, stream.folderName],
@@ -553,6 +588,226 @@ class StreamFilterer {
         }
       }
     }
+
+    const getAnimeEntryBareEpisodeAlias = (
+      stream: ParsedStream
+    ): string | undefined => {
+      const animeEpisode = context.animeEpisode;
+      const animeEntry = context.animeEntry;
+
+      if (
+        !isAnime ||
+        !animeEntry ||
+        animeEpisode === undefined ||
+        (!stream.filename && !stream.folderName)
+      ) {
+        return undefined;
+      }
+
+      // Keep token boundaries while folding punctuation/separators so
+      // bare-episode filenames can be matched conservatively.
+      const normaliseBareEpisodeText = (value: string) =>
+        value
+          .normalize('NFKD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/&/g, ' and ')
+          // Keep fractional episode numbers distinct from integer episodes.
+          .replace(/(\d)\.(\d+)(?=(?:v\d+)?(?![\p{L}\p{N}]))/gu, '$1decimal$2')
+          .replace(/[^\p{L}\p{N}]+/gu, ' ')
+          .trim();
+
+      const normalisedReleaseText = normaliseBareEpisodeText(
+        [stream.folderName, stream.filename]
+          .filter((value): value is string => !!value)
+          .join(' ')
+      );
+      // Prefer the full matching alias over a shorter suffix alias.
+      const aliases = [animeEntry.title, ...(animeEntry.synonyms ?? [])]
+        .filter((title): title is string => !!title)
+        .sort(
+          (a, b) =>
+            normaliseBareEpisodeText(b).length -
+            normaliseBareEpisodeText(a).length
+        );
+
+      const matchedAlias = aliases.find((alias) => {
+        const normalisedAlias = normaliseBareEpisodeText(alias);
+        if (!normalisedAlias) return false;
+
+        const escapedAlias = normalisedAlias.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          '\\$&'
+        );
+
+        return new RegExp(
+          `(?:^|\\s)${escapedAlias}\\s+(?:e\\s*)?0*${normaliseBareEpisodeText(String(animeEpisode))}(?:v\\d+)?(?:\\s|$)`,
+          'u'
+        ).test(normalisedReleaseText);
+      });
+
+      if (!matchedAlias) {
+        return undefined;
+      }
+
+      return matchedAlias;
+    };
+
+    const titleOptions = this.userData.titleMatching;
+    const titleRequestType = isAnime ? 'anime' : type;
+    let titleConflicts = new Map<string, TitleConflict[]>();
+    let conflictNumberingBounds = new Map<
+      number | string,
+      ConflictNumberingBounds
+    >();
+    const releaseEpisodeEvidence = (stream: ParsedStream) =>
+      matchingReleaseEpisodeFloor(
+        stream.parsedFile ?? {},
+        {
+          season: parsedId?.season ? Number(parsedId.season) : undefined,
+          episode: parsedId?.episode ? Number(parsedId.episode) : undefined,
+          absoluteEpisode: isAnime
+            ? requestedMetadata?.absoluteEpisode
+            : undefined,
+          relativeAbsoluteEpisode: isAnime
+            ? requestedMetadata?.relativeAbsoluteEpisode
+            : undefined,
+        },
+        stream.filename
+      );
+    const verifiedRequestSeason =
+      ['imdbId', 'thetvdbId', 'themoviedbId'].includes(parsedId?.type ?? '') &&
+      requestedMetadata?.seasons?.some(
+        (season) =>
+          season.season_number === Number(parsedId?.season) &&
+          season.episode_count > 0
+      )
+        ? Number(parsedId?.season)
+        : undefined;
+    const releaseSeasonEvidence = (stream: ParsedStream) =>
+      matchingReleaseSeason(
+        stream.parsedFile ?? {},
+        verifiedRequestSeason,
+        parsedId?.episode ? Number(parsedId.episode) : undefined,
+        stream.filename
+      );
+    if (
+      titleOptions?.enabled &&
+      titleOptions.ambiguousResults === 'discard' &&
+      appConfig.metadata.titleConflicts.enabled &&
+      (type === 'series' || type === 'anime') &&
+      requestedMetadata?.titles?.length &&
+      (!titleOptions.requestTypes?.length ||
+        titleOptions.requestTypes.includes(titleRequestType))
+    ) {
+      titleConflicts = await getStreamTitleConflicts(
+        requestedMetadata,
+        streams
+          .filter(
+            (stream) =>
+              (getAnimeEntryBareEpisodeAlias(stream) ||
+                (stream.parsedFile?.title && stream.filename)) &&
+              (!titleOptions.addons?.length ||
+                titleOptions.addons.includes(stream.addon?.preset?.id ?? ''))
+          )
+          .map(
+            (stream) =>
+              getAnimeEntryBareEpisodeAlias(stream) ??
+              preprocessTitle(
+                stream.parsedFile!.title!,
+                [stream.filename, stream.folderName],
+                requestedTitleStrings
+              )
+          ),
+        {
+          tmdbAuth: {
+            accessToken: this.userData.tmdbAccessToken,
+            apiKey: this.userData.tmdbApiKey,
+          },
+          tvdbApiKey: this.userData.tvdbApiKey,
+        }
+      );
+      // Fetch details only for untagged episodes or packs that could benefit.
+      // Episode/season 1 cannot exceed a nonempty catalog.
+      const episodeConflicts = streams.flatMap((stream) => {
+        if (
+          !stream.filename ||
+          !stream.parsedFile?.title ||
+          stream.parsedFile.year ||
+          stream.parsedFile.country ||
+          ((releaseEpisodeEvidence(stream) ?? 0) <= 1 &&
+            (releaseSeasonEvidence(stream) ?? 0) <= 1) ||
+          (titleOptions.addons?.length &&
+            !titleOptions.addons.includes(stream.addon?.preset?.id ?? ''))
+        )
+          return [];
+        const title = normaliseTitle(
+          getAnimeEntryBareEpisodeAlias(stream) ??
+            preprocessTitle(
+              stream.parsedFile.title,
+              [stream.filename, stream.folderName],
+              requestedTitleStrings
+            )
+        );
+        return titleConflicts.get(title) ?? [];
+      });
+      const tvdbApiKey =
+        this.userData.tvdbApiKey || appConfig.metadata.tvdb.apiKey;
+      conflictNumberingBounds = await getConflictNumberingBounds(
+        episodeConflicts,
+        undefined,
+        tvdbApiKey
+          ? (id) =>
+              new TVDBMetadata({ apiKey: tvdbApiKey }).getEpisodeCatalog(id)
+          : undefined,
+        this.userData.tmdbApiKey ||
+          this.userData.tmdbAccessToken ||
+          appConfig.metadata.tmdb.apiKey ||
+          appConfig.metadata.tmdb.accessToken
+          ? (id) =>
+              new TMDBMetadata({
+                apiKey: this.userData.tmdbApiKey,
+                accessToken: this.userData.tmdbAccessToken,
+              }).getEpisodeCatalog(id)
+          : undefined,
+        this.userData.tmdbApiKey ||
+          this.userData.tmdbAccessToken ||
+          appConfig.metadata.tmdb.apiKey ||
+          appConfig.metadata.tmdb.accessToken
+          ? (id) =>
+              new TMDBMetadata({
+                apiKey: this.userData.tmdbApiKey,
+                accessToken: this.userData.tmdbAccessToken,
+              }).getSeasonBound(id)
+          : undefined
+      );
+    }
+
+    // Only fetch show-level title evidence for ambiguous releases that name a
+    // distinctive episode; generic "Episode 2" labels never trigger lookups.
+    const namedConflictAliases = new Map<string, TitleConflict[]>();
+    for (const stream of streams) {
+      if (
+        !isDistinctiveEpisodeTitle(stream.parsedFile?.episodeTitle) ||
+        !stream.parsedFile?.title
+      )
+        continue;
+      const alias = normaliseTitle(
+        preprocessTitle(
+          stream.parsedFile.title,
+          [stream.filename, stream.folderName],
+          requestedTitleStrings
+        )
+      );
+      const competitors = titleConflicts.get(alias);
+      if (competitors?.length) namedConflictAliases.set(alias, competitors);
+    }
+    const identityEpisodeTitles = requestedMetadata
+      ? await getShowIdentityEpisodeTitles(
+          requestedMetadata,
+          namedConflictAliases
+        )
+      : new Map<string, Set<string>>();
 
     // fill in bitrate from metadata runtime and size if missing and enabled
     if (this.userData.bitrate?.useMetadataRuntime !== false) {
@@ -896,7 +1151,10 @@ class StreamFilterer {
       }
     };
 
-    // undefined = cannot judge (nothing usable parsed, or no expected titles)
+    /**
+     * Match the parsed episode name, allowing numbered release labels.
+     * Return undefined when titles or language coverage cannot support a verdict.
+     */
     const episodeTitleMatches = (
       stream: ParsedStream,
       threshold: number
@@ -905,11 +1163,35 @@ class StreamFilterer {
       const expected = requestedMetadata?.episodeTitles;
       if (!parsedEpisodeTitle || !expected?.length) return undefined;
 
-      const result = titleMatchWithLang(
+      let result = titleMatchWithLang(
         normaliseTitle(parsedEpisodeTitle),
         expected,
         { threshold }
       );
+      if (!result.matched) {
+        // Numbered labels are release formatting, not part of the episode
+        // name. Keep the full-name match first and never strip a bare label.
+        const withoutLabel = parsedEpisodeTitle.replace(
+          /^(?:chapter|episode|part)[\s._-]+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|[ivxlcdm]+)[\s.:_-]+(?=\S)/i,
+          (label, number: string) => {
+            // Roman-letter words such as "Vic" and "Did" are not numerals.
+            if (
+              /^[ivxlcdm]+$/i.test(number) &&
+              !/^m{0,3}(?:cm|cd|d?c{0,3})(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/i.test(
+                number
+              )
+            ) {
+              return label;
+            }
+            return '';
+          }
+        );
+        if (withoutLabel !== parsedEpisodeTitle) {
+          result = titleMatchWithLang(normaliseTitle(withoutLabel), expected, {
+            threshold,
+          });
+        }
+      }
       if (result.matched) {
         inferLanguageFromMatch(stream, result.language, 'episodeTitle');
         return true;
@@ -953,15 +1235,14 @@ class StreamFilterer {
       let streamTitle = stream.parsedFile?.title;
       if (
         titleMatchingOptions.requestTypes?.length &&
-        (!titleMatchingOptions.requestTypes.includes(type) ||
-          (isAnime && !titleMatchingOptions.requestTypes.includes('anime')))
+        !titleMatchingOptions.requestTypes.includes(titleRequestType)
       ) {
         return true;
       }
 
       if (
         titleMatchingOptions.addons?.length &&
-        !titleMatchingOptions.addons.includes(stream.addon.preset.id)
+        !titleMatchingOptions.addons.includes(stream.addon?.preset?.id ?? '')
       ) {
         return true;
       }
@@ -1021,44 +1302,46 @@ class StreamFilterer {
         return false;
       }
 
-      const conflicts = requestedMetadata.titleConflicts;
+      const conflicts = titleConflicts.get(normalisedStreamTitle);
       if (
         titleMatchingOptions.ambiguousResults === 'discard' &&
         conflicts?.length
       ) {
-        // Release groups tag the newcomer, not the incumbent, so an untagged
-        // release belongs to the earliest show of that name.
-        const requestedIsOriginal =
-          requestedMetadata.year !== undefined &&
-          conflicts.every(
-            (conflict) =>
-              conflict.year === undefined ||
-              conflict.year >= requestedMetadata.year!
-          );
-        if (!requestedIsOriginal) {
-          const countryConfirms =
-            !!streamCountry && streamCountry === requestedCountry;
-          const yearConfirms = (() => {
-            const rawYear = stream.parsedFile?.year;
-            if (!rawYear) return false;
-            const start = parseInt(rawYear.split('-')[0]);
-            if (Number.isNaN(start)) return false;
-            const candidates = requestedMetadata.releaseYears?.length
-              ? requestedMetadata.releaseYears
-              : [requestedMetadata.year].filter(
-                  (year): year is number => year !== undefined
-                );
-            return candidates.some((year) => Math.abs(start - year) <= 1);
-          })();
-          const episodeTitleConfirms =
-            episodeTitleMatches(
-              stream,
-              this.userData.episodeTitleMatching?.similarityThreshold ?? 0.8
-            ) === true;
-          if (!countryConfirms && !yearConfirms && !episodeTitleConfirms) {
-            return false;
-          }
-        }
+        const episodeTitleVerdict = episodeTitleMatches(
+          stream,
+          this.userData.episodeTitleMatching?.similarityThreshold ?? 0.8
+        );
+        const uploadYear =
+          typeof stream.age === 'number' &&
+          Number.isFinite(stream.age) &&
+          stream.age >= 0
+            ? new Date(start - stream.age * 60 * 60 * 1000).getUTCFullYear()
+            : undefined;
+        const evidence = {
+          uploadYear,
+          year: stream.parsedFile?.year,
+          country: streamCountry,
+          episode: releaseEpisodeEvidence(stream),
+          season: releaseSeasonEvidence(stream),
+          conflictNumberingBounds,
+          episodeTitleMatches:
+            episodeTitleVerdict === true ||
+            (stream.parsedFile?.year === undefined &&
+              !streamCountry &&
+              identityEpisodeTitles
+                .get(normalisedStreamTitle)
+                ?.has(
+                  showIdentityEpisodeTitleKey(
+                    stream.parsedFile?.episodeTitle ?? ''
+                  )
+                ) === true),
+        };
+        const confirmed = confirmsTitleIdentity(
+          requestedMetadata,
+          conflicts,
+          evidence
+        );
+        if (!confirmed) return false;
       }
 
       inferLanguageFromMatch(stream, result.language, 'title');
@@ -1192,70 +1475,6 @@ class StreamFilterer {
       return overlaps(requestedYearRange[0], requestedYearRange[1]);
     };
 
-    const getAnimeEntryBareEpisodeAlias = (
-      stream: ParsedStream
-    ): string | undefined => {
-      const animeEpisode = context.animeEpisode;
-      const animeEntry = context.animeEntry;
-
-      if (
-        !isAnime ||
-        !animeEntry ||
-        animeEpisode === undefined ||
-        (!stream.filename && !stream.folderName)
-      ) {
-        return undefined;
-      }
-
-      // Keep token boundaries while folding punctuation/separators so
-      // bare-episode filenames can be matched conservatively.
-      const normaliseBareEpisodeText = (value: string) =>
-        value
-          .normalize('NFKD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase()
-          .replace(/&/g, ' and ')
-          // Keep fractional episode numbers distinct from integer episodes.
-          .replace(/(\d)\.(\d+)(?=(?:v\d+)?(?![\p{L}\p{N}]))/gu, '$1decimal$2')
-          .replace(/[^\p{L}\p{N}]+/gu, ' ')
-          .trim();
-
-      const normalisedReleaseText = normaliseBareEpisodeText(
-        [stream.folderName, stream.filename]
-          .filter((value): value is string => !!value)
-          .join(' ')
-      );
-      // Prefer the full matching alias over a shorter suffix alias.
-      const aliases = [animeEntry.title, ...(animeEntry.synonyms ?? [])]
-        .filter((title): title is string => !!title)
-        .sort(
-          (a, b) =>
-            normaliseBareEpisodeText(b).length -
-            normaliseBareEpisodeText(a).length
-        );
-
-      const matchedAlias = aliases.find((alias) => {
-        const normalisedAlias = normaliseBareEpisodeText(alias);
-        if (!normalisedAlias) return false;
-
-        const escapedAlias = normalisedAlias.replace(
-          /[.*+?^${}()|[\]\\]/g,
-          '\\$&'
-        );
-
-        return new RegExp(
-          `(?:^|\\s)${escapedAlias}\\s+(?:e\\s*)?0*${normaliseBareEpisodeText(String(animeEpisode))}(?:v\\d+)?(?:\\s|$)`,
-          'u'
-        ).test(normalisedReleaseText);
-      });
-
-      if (!matchedAlias) {
-        return undefined;
-      }
-
-      return matchedAlias;
-    };
-
     const performSeasonEpisodeMatch = (stream: ParsedStream) => {
       const seasonEpisodeMatchingOptions = this.userData.seasonEpisodeMatching;
       if (
@@ -1287,6 +1506,20 @@ class StreamFilterer {
         !seasonEpisodeMatchingOptions.addons.includes(stream.addon.preset.id)
       ) {
         return true;
+      }
+
+      // A combined video does not provide isolated episode playback.
+      // Keep pack titles eligible for individual-file selection.
+      if (
+        type === 'series' &&
+        requestedEpisode !== undefined &&
+        isCombinedEpisodeVideo(stream, {
+          season: requestedSeason,
+          episode: requestedEpisode,
+          absoluteEpisode: requestedMetadata?.absoluteEpisode,
+        })
+      ) {
+        return false;
       }
 
       // if the requested content is a movie and season/episode is present, filter out

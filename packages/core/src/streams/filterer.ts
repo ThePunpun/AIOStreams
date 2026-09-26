@@ -60,6 +60,11 @@ import {
   getConflictNumberingBounds,
 } from './title-conflict-episodes.js';
 
+import {
+  recoverAnimeRelease,
+  isRecoveredAnimeEpisodeWrong,
+} from '../parser/anime-release.js';
+
 const logger = createLogger('filterer');
 
 const FILTER_SLICE_MS = 8;
@@ -523,6 +528,7 @@ class StreamFilterer {
       this.requestedTitleStrings.set(requestedMetadata, requestedTitleStrings);
     }
 
+    const recoveredEpisodeMismatches = new Set<ParsedStream>();
     if (requestedTitleStrings.length) {
       let reconcileSliceStart = performance.now();
       for (const stream of streams) {
@@ -540,6 +546,44 @@ class StreamFilterer {
           );
           if (recovered !== stream.parsedFile) {
             stream.parsedFile = recovered;
+          }
+        }
+        if (
+          context.isAnime &&
+          stream.filename &&
+          (stream.type === 'usenet' || stream.type === 'stremio-usenet')
+        ) {
+          const original = parseTorrentTitleCached(stream.filename);
+          const recovered = recoverAnimeRelease(stream.filename, original, {
+            isAnime: type === 'series',
+            episode: parsedId?.episode ? Number(parsedId.episode) : undefined,
+            absoluteEpisode: requestedMetadata?.absoluteEpisode,
+            titles: requestedTitleStrings,
+          });
+          if (
+            recovered !== original &&
+            (!stream.parsedFile.episodes?.length ||
+              (stream.parsedFile.episodes.length === 1 &&
+                stream.parsedFile.episodes[0] === recovered.episodes?.[0])) &&
+            !stream.parsedFile.seasons?.length
+          ) {
+            if (
+              isRecoveredAnimeEpisodeWrong(recovered, {
+                episode: parsedId?.episode
+                  ? Number(parsedId.episode)
+                  : undefined,
+                absoluteEpisode: requestedMetadata?.absoluteEpisode,
+                relativeAbsoluteEpisode:
+                  requestedMetadata?.relativeAbsoluteEpisode,
+              })
+            )
+              recoveredEpisodeMismatches.add(stream);
+            stream.parsedFile = {
+              ...stream.parsedFile,
+              title: recovered.title,
+              episodes: recovered.episodes,
+              releaseGroup: recovered.group ?? stream.parsedFile.releaseGroup,
+            };
           }
         }
         const reconciled = reconcileParsedName(
@@ -1538,6 +1582,7 @@ class StreamFilterer {
       ) {
         return false;
       }
+      if (recoveredEpisodeMismatches.has(stream)) return false;
 
       // if the requested content is a movie and season/episode is present, filter out
       if (

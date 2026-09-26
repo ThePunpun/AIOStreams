@@ -482,6 +482,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
       /** @deprecated Use titleLanguages instead. */
       useAllTitles?: boolean;
       titleLanguages?: string[];
+      titleLimit?: number;
     }
   ): string[] {
     const { addYear, addSeasonEpisode } = {
@@ -496,6 +497,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
 
     // select titles based on options
     const titleLangs = options?.titleLanguages;
+    const titleLimit = options?.titleLimit ?? appConfig.builtins.scrape.titleLimit;
     let titles: string[];
 
     if (titleLangs && titleLangs.length > 0) {
@@ -505,7 +507,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
           selected.add(metadata.primaryTitle);
         } else if (spec === 'all') {
           metadata.titlesWithLang
-            ?.slice(0, appConfig.builtins.scrape.titleLimit)
+            ?.slice(0, titleLimit)
             .forEach((t) => selected.add(cleanTitle(t.title, t.language)));
           break; // no need to process further specs
         } else if (spec === 'original') {
@@ -518,7 +520,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
           if (match) selected.add(cleanTitle(match.title, match.language));
         } else if (spec === 'scene') {
           metadata.sceneTitles
-            ?.slice(0, appConfig.builtins.scrape.titleLimit)
+            ?.slice(0, titleLimit)
             .forEach((title) => selected.add(cleanTitle(title)));
         } else {
           // take only the first matching title.
@@ -538,7 +540,7 @@ export abstract class BaseDebridAddon<T extends BaseDebridConfig> {
         metadata.titlesWithLang ??
         metadata.titles.map((title) => ({ title, language: undefined }))
       )
-        .slice(0, appConfig.builtins.scrape.titleLimit)
+        .slice(0, titleLimit)
         .map((t) => cleanTitle(t.title, t.language));
     } else {
       titles = [metadata.primaryTitle];

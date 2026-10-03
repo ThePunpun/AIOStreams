@@ -53,6 +53,7 @@ const builtinsSchemaWithTitleLimits = {
     titleLimits: titleLimitsField,
     queryConcurrency: builtinsSchema.scrape.queryConcurrency,
     latinQueriesOnly: builtinsSchema.scrape.latinQueriesOnly,
+    yearlessMovieFallback: builtinsSchema.scrape.yearlessMovieFallback,
     dateBased: builtinsSchema.scrape.dateBased,
     absoluteSearch: builtinsSchema.scrape.absoluteSearch,
   },

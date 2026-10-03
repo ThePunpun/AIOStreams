@@ -473,6 +473,8 @@ export class MetadataService {
 
             // series only: movie results carry a year already
             let titleConflictsPromise: Promise<TitleConflict[]> | undefined;
+            let titleConflictsUnavailable = false;
+            let completedTitleConflicts: TitleConflict[] = [];
             if (
               type === 'series' &&
               appConfig.metadata.titleConflicts.enabled &&
@@ -489,11 +491,15 @@ export class MetadataService {
                   apiKey: this.config.tmdbApiKey,
                 },
                 tvdbApiKey: this.config.tvdbApiKey,
+                onProgress: (partial) => {
+                  completedTitleConflicts = partial;
+                },
               }).catch((error) => {
                 logger.debug(
                   `Title conflict detection failed for ${id.fullId}: ${error}`
                 );
-                return [];
+                titleConflictsUnavailable = true;
+                return completedTitleConflicts;
               });
             }
 
@@ -885,6 +891,7 @@ export class MetadataService {
               titleConflicts: titleConflicts?.length
                 ? titleConflicts
                 : undefined,
+              titleConflictsUnavailable: titleConflictsUnavailable || undefined,
               episodeTitles,
               releaseYears: releaseYears.length ? releaseYears : undefined,
               seasons: merged.seasons,

@@ -17,6 +17,7 @@ const build = (
       options?: {
         useAllTitles?: boolean;
         titleLanguages?: string[];
+        titleLimit?: number;
       }
     ) => string[];
   }
@@ -73,6 +74,22 @@ async function initialiseTitleLimit(
 before(() => initialiseTitleLimit(3));
 
 describe('queries for conflicting series names', () => {
+  it('uses the per-indexer limit when prioritizing conflicting aliases', () => {
+    const queries = build(
+      id,
+      {
+        ...metadata,
+        primaryTitle: 'display title',
+        titles: ['Display Title'],
+        titlesWithLang: [{ title: 'Original Name', language: 'tr' }],
+        sceneTitles: ['Scene Name'],
+        isDateBased: false,
+      },
+      { titleLimit: 1 }
+    );
+    assert.ok(queries.includes('original name S01E05'));
+    assert.ok(queries.every((query) => query.startsWith('original name')));
+  });
   it('searches Carpinti using both episode numbering and air date, without repeated years or duplicate queries', () => {
     const queries = build(id, metadata, { useAllTitles: true });
     assert.ok(queries.includes('carpinti S01E05'));

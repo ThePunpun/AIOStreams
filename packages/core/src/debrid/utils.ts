@@ -1,4 +1,4 @@
-import { z } from 'zod';
+﻿import { z } from 'zod';
 import {
   constants,
   createLogger,
@@ -34,6 +34,10 @@ import { ParsedResult } from '@viren070/parse-torrent-title';
 import { parseTorrentTitleCached } from '../parser/title.js';
 import { isLocalEpisodeWrong } from '../anime-database/episode-titles.js';
 import { isSeasonAbsoluteEpisodePairWrong } from '../anime-database/episode-pairs.js';
+import {
+  recoverAnimeRelease,
+  isRecoveredAnimeEpisodeWrong,
+} from '../parser/anime-release.js';
 
 const logger = createLogger('debrid');
 
@@ -425,6 +429,23 @@ export async function selectFileInTorrentOrNZB(
   metadata?: TitleMetadata,
   options?: SelectionOptions
 ): Promise<DebridFile | undefined> {
+  const recoveredEpisodeMismatches = new Set<string>();
+  if (torrentOrNZB.type === 'usenet' && metadata?.isAnime) {
+    // Local copy: playback and initial selection must use the same interpretation,
+    // without changing parser results shared with another request or service.
+    parsedFiles = new Map(
+      [...parsedFiles].map(([name, parsed]) => {
+        const recovered = recoverAnimeRelease(name, parsed, metadata);
+        if (
+          recovered !== parsed &&
+          isRecoveredAnimeEpisodeWrong(recovered, metadata)
+        ) {
+          recoveredEpisodeMismatches.add(name);
+        }
+        return [name, recovered];
+      })
+    );
+  }
   const report: SelectionReport = {
     torrentTitle: torrentOrNZB.title,
     timestamp: new Date().toISOString(),
@@ -551,6 +572,12 @@ export async function selectFileInTorrentOrNZB(
       skipReason: null,
     };
 
+    if (recoveredEpisodeMismatches.has(file.name ?? '')) {
+      fileReport.skipped = true;
+      fileReport.skipReason = 'Recovered absolute episode mismatch';
+      report.files.push(fileReport);
+      continue;
+    }
     if (isNotVideo[index]) {
       fileReport.skipped = true;
       fileReport.skipReason = 'Not a video file';
@@ -657,7 +684,7 @@ export async function selectFileInTorrentOrNZB(
         score -= 800;
         fileReport.scoreBreakdown.wrongDatePenalty = -800;
       }
-    } else if (matchesBareRelativeEpisode) {
+    } else if (matchesBareRelativeEpisode && !localEpisodeWrong) {
       score += 400;
       fileReport.scoreBreakdown.episodeMatchType = 'bareRelativeAbsolute';
       fileReport.scoreBreakdown.episodeScore = 400;

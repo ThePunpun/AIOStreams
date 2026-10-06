@@ -33,7 +33,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 /// The id on the Start menu shortcut Velopack makes, which gives the system's
 /// media controls the app's name and icon.
-const APP_ID: &str = "velopack.aiostreams-desktop";
+const APP_ID: &str = "aiostreams-custom.seek-previews";
 
 /// Set before any window opens.
 pub fn claim_app_id() {
@@ -47,7 +47,7 @@ pub const PLATFORM: &str = "windows";
 pub const WEB_DATA_DIR: &str = "WebView2";
 
 /// The main window's class, which a second launch looks the first one up by.
-pub const WINDOW_CLASS: &str = "AIOStreamsDesktop";
+pub const WINDOW_CLASS: &str = "AIOStreamsCustomDesktop";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()

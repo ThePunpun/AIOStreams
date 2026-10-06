@@ -68,6 +68,8 @@ import { SyncByEar, SyncToLine } from './subtitle-sync';
 import { RATES, usePlayerKeys } from './player-keys';
 import { chapterAt, type Chapter } from '../lib/playback/chapters';
 import type { BaseItemDto, MediaSegmentDto } from '../lib/types';
+import { closestPreview } from '../lib/playback/preview-policy';
+import type { SeekPreviews } from '../lib/hosts/shell/previews';
 
 const IDLE_MS = 2000;
 const SKIP_BUTTON_MS = 8000;
@@ -156,6 +158,7 @@ function SeekBar({
   chapters,
   onSeek,
   onStep,
+  previews,
 }: {
   positionMs: number;
   durationMs: number;
@@ -165,10 +168,62 @@ function SeekBar({
   onSeek(ms: number): void;
   /** The arrow keys skip as the skip buttons do. */
   onStep(direction: number): void;
+  previews?: SeekPreviews;
 }) {
   const bar = React.useRef<HTMLDivElement>(null);
+  const tooltip = React.useRef<HTMLDivElement>(null);
+  const [tooltipWidth, setTooltipWidth] = React.useState(0);
   const [hover, setHover] = React.useState<number | null>(null);
   const [drag, setDrag] = React.useState<number | null>(null);
+  const target = drag ?? hover;
+  const targetBucket = target === null ? null : Math.floor(target / 2000);
+  const preview =
+    target !== null && previews?.enabled
+      ? closestPreview(previews.images, target)
+      : null;
+  const tooltipShown = target !== null && durationMs > 0;
+  const previewBox = !!(
+    preview ||
+    (previews?.enabled && previews.status !== 'unavailable')
+  );
+  React.useLayoutEffect(() => {
+    const el = tooltip.current;
+    if (!tooltipShown || !el) return;
+    const measure = () => setTooltipWidth(el.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [tooltipShown]);
+  const requestedAt = React.useRef(performance.now());
+  const report = previews?.report;
+  const request = previews?.request;
+  const session = previews?.session;
+  const sampled = useLatest(preview);
+  React.useEffect(() => {
+    requestedAt.current = performance.now();
+    request?.(null);
+    if (!session || targetBucket === null) {
+      request?.(null);
+      return;
+    }
+    // Cached images render immediately; only remote work waits for pointer settling.
+    const timer = setTimeout(() => request?.(targetBucket * 2000), 75);
+    return () => clearTimeout(timer);
+  }, [session, targetBucket, request]);
+  React.useEffect(() => {
+    if (!session || targetBucket === null) return;
+    const image = sampled.current;
+    report?.(
+      image
+        ? image.bucket === targetBucket
+          ? 'cache-hit'
+          : 'approximate'
+        : 'miss',
+      targetBucket * 2000,
+      performance.now() - requestedAt.current
+    );
+  }, [session, targetBucket, sampled, report]);
   const at = (clientX: number) => {
     const rect = bar.current?.getBoundingClientRect();
     if (!rect || !durationMs) return 0;
@@ -210,6 +265,10 @@ function SeekBar({
       onPointerUp={() => {
         if (drag !== null) onSeek(drag);
         setDrag(null);
+      }}
+      onPointerCancel={() => {
+        setDrag(null);
+        setHover(null);
       }}
       onPointerLeave={() => setHover(null)}
     >
@@ -256,15 +315,55 @@ function SeekBar({
         className="absolute size-3.5 -translate-x-1/2 rounded-full bg-white opacity-0 shadow transition-opacity group-hover/seek:opacity-100"
         style={{ left: percent(shown), opacity: drag !== null ? 1 : undefined }}
       />
-      {hover !== null && durationMs > 0 && (
+      {tooltipShown && target !== null && (
         <div
+          ref={tooltip}
           data-ui="seek-bar-tooltip"
-          className="pointer-events-none absolute bottom-6 -translate-x-1/2 rounded-md bg-black/80 px-2 py-1 text-xs tabular-nums"
-          style={{ left: percent(hover) }}
+          className="pointer-events-none absolute bottom-6 max-w-full rounded-md bg-black/90 px-2 py-1 text-xs tabular-nums shadow-lg"
+          style={{
+            width: previewBox ? 'min(336px, 100%)' : undefined,
+            left: `clamp(0px, calc(${percent(target)} - ${tooltipWidth / 2}px), max(0px, 100% - ${tooltipWidth}px))`,
+          }}
         >
-          {segments.find((s) => hover >= s.startMs && hover < s.endMs)?.type ??
-            chapters[chapterAt(chapters, hover)]?.title}{' '}
-          {clock(hover)}
+          {previewBox && (
+            <div className="mb-1 flex aspect-video w-full items-center justify-center overflow-hidden rounded-sm bg-white/5">
+              {preview ? (
+                <img
+                  src={preview.image}
+                  alt={`Preview at ${clock(preview.position * 1000)}`}
+                  className="h-full w-full object-contain"
+                  onLoad={() =>
+                    report?.(
+                      'display',
+                      target,
+                      performance.now() - requestedAt.current
+                    )
+                  }
+                />
+              ) : (
+                <span className="flex items-center gap-2 text-white/50">
+                  <LuLoaderCircle className="size-4 animate-spin" />
+                  Loading preview…
+                </span>
+              )}
+            </div>
+          )}
+          <div className="flex items-center justify-center gap-1">
+            <span className="truncate">
+              {segments.find((s) => target >= s.startMs && target < s.endMs)
+                ?.type ?? chapters[chapterAt(chapters, target)]?.title}
+            </span>
+            <span className="shrink-0">{clock(target)}</span>
+          </div>
+          {previewBox ? (
+            <div className="h-4 text-center text-[10px] text-white/60">
+              {preview && Math.abs(preview.position * 1000 - target) >= 1000
+                ? `Preview at ${clock(preview.position * 1000)}`
+                : null}
+            </div>
+          ) : previews?.enabled ? (
+            <div className="text-center text-white/50">Preview unavailable</div>
+          ) : null}
         </div>
       )}
     </div>
@@ -1204,6 +1303,7 @@ export function PlayerControls({
           {time}
         </p>
         <SeekBar
+          previews={player.seekPreviews}
           positionMs={state.positionMs}
           durationMs={state.durationMs}
           bufferedMs={state.bufferedMs}

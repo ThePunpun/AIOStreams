@@ -8,11 +8,13 @@ use log::{Level, LevelFilter, Log, Metadata, Record};
 use crate::platform;
 
 const PREFIX: &str = "aiostreams-desktop-";
+const PREVIEW_PREFIX: &str = "seek-previews-";
 /// Days of logs kept, one file for each day the app was started.
 const KEEP: usize = 7;
 
 struct FileLogger {
     file: Mutex<Option<File>>,
+    preview_file: Mutex<Option<File>>,
     level: LevelFilter,
 }
 
@@ -25,7 +27,8 @@ fn short_target(target: &str) -> &str {
 }
 
 fn ours(target: &str) -> bool {
-    target.starts_with("aiostreams_desktop") || matches!(target, "mpv" | "web" | "panic")
+    target.starts_with("aiostreams_desktop")
+        || matches!(target, "mpv" | "web" | "panic" | "seek_preview")
 }
 
 impl Log for FileLogger {
@@ -55,6 +58,12 @@ impl Log for FileLogger {
         {
             let _ = file.write_all(line.as_bytes());
         }
+        if record.target() == "seek_preview"
+            && let Ok(mut file) = self.preview_file.lock()
+            && let Some(file) = file.as_mut()
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 
     fn flush(&self) {
@@ -66,7 +75,7 @@ impl Log for FileLogger {
     }
 }
 
-fn prune(dir: &Path) {
+fn prune(dir: &Path, prefix: &str) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -76,7 +85,7 @@ fn prune(dir: &Path) {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with(PREFIX) && n.ends_with(".log"))
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".log"))
         })
         .collect();
     logs.sort();
@@ -100,14 +109,22 @@ pub fn init(dir: &Path) -> PathBuf {
         .append(true)
         .open(&path)
         .ok();
-    prune(dir);
+    let preview_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("{PREVIEW_PREFIX}{date}.log")))
+        .ok();
+    prune(dir, PREFIX);
+    prune(dir, PREVIEW_PREFIX);
     let logger = Box::leak(Box::new(FileLogger {
         file: Mutex::new(file),
+        preview_file: Mutex::new(preview_file),
         level,
     }));
     if log::set_logger(logger).is_ok() {
         log::set_max_level(level);
     }
+    log::info!(target: "seek_preview", "build={} sha={} platform={} thumbnail_width=320 interval_s=adaptive-5-to-30 preview_revision=4 settle_ms=75", env!("CARGO_PKG_VERSION"), option_env!("AIOSTREAMS_BUILD_SHA").unwrap_or("local"), platform::PLATFORM);
 
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

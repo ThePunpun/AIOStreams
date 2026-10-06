@@ -21,6 +21,29 @@ pub enum UpdateChannel {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Inbound {
+    PreviewStart {
+        session: String,
+        url: String,
+    },
+    PreviewStop {
+        session: String,
+    },
+    PreviewRequest {
+        session: String,
+        position: Option<f64>,
+    },
+    PreviewHover {
+        session: String,
+        active: bool,
+    },
+    PreviewReport {
+        session: String,
+        event: String,
+        position: f64,
+        elapsed_ms: f64,
+        reason: Option<String>,
+        sampled_position: Option<f64>,
+    },
     /// `external` messages go to the player started with `external-open`.
     MpvCommand {
         args: Vec<Value>,
@@ -110,6 +133,23 @@ pub enum Inbound {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Outbound {
+    PreviewStatus {
+        session: String,
+        state: String,
+        step_ms: u32,
+        aspect_ratio: Option<f64>,
+    },
+    PreviewFrame {
+        session: String,
+        bucket: u32,
+        position: f64,
+        covers_until: f64,
+        covers_from: f64,
+        image: String,
+        aspect_ratio: f64,
+        cached: bool,
+        elapsed_ms: u64,
+    },
     MpvProp {
         name: String,
         data: Value,

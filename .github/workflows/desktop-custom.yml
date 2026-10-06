@@ -1,0 +1,119 @@
+name: AIOStreams Custom Windows
+
+on:
+  push:
+    branches: [desktop-seek-previews]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-custom-windows
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    if: github.event_name != 'pull_request' || (github.head_ref == 'desktop-seek-previews' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: windows-latest
+    env:
+      AIOSTREAMS_BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/desktop
+      - name: Build the bundled UI
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts --filter "@aiostreams/jellyfin-web..."
+          if ($LASTEXITCODE -ne 0) { throw 'dependency install failed' }
+          pnpm -F @aiostreams/crypto build
+          if ($LASTEXITCODE -ne 0) { throw 'crypto declarations failed' }
+          pnpm -F @aiostreams/core build
+          if ($LASTEXITCODE -ne 0) { throw 'core declarations failed' }
+          pnpm -F @aiostreams/jellyfin-web typecheck
+          if ($LASTEXITCODE -ne 0) { throw 'UI typecheck failed' }
+          node --test packages/jellyfin-web/test/preview-policy.test.ts
+          if ($LASTEXITCODE -ne 0) { throw 'preview policy tests failed' }
+          pnpm -F @aiostreams/jellyfin-web build:standalone
+          if ($LASTEXITCODE -ne 0) { throw 'UI build failed' }
+      - name: Check and build native app
+        working-directory: packages/desktop
+        run: |
+          cargo fmt --check
+          if ($LASTEXITCODE -ne 0) { throw 'rustfmt failed' }
+          cargo clippy --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw 'clippy failed' }
+          cargo test
+          if ($LASTEXITCODE -ne 0) { throw 'Rust tests failed' }
+          cargo build --release
+          if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
+      - name: Fetch checked playback libraries
+        run: ./packages/desktop/scripts/fetch-libmpv.ps1 -Arch x86_64
+      - name: Generate bundled licence notices
+        working-directory: packages/desktop
+        run: |
+          cargo install cargo-about --version 0.9.2 --locked --features cli
+          if ($LASTEXITCODE -ne 0) { throw 'licence tool install failed' }
+          cargo about generate --config about.toml --target x86_64-pc-windows-msvc about.hbs -o third-party-licenses.html
+          if ($LASTEXITCODE -ne 0) { throw 'licence notices failed' }
+      - name: Exercise the Windows decoder
+        env:
+          PREVIEW_TEST_LIBMPV: ${{ github.workspace }}/packages/desktop/vendor/x86_64/libmpv-2.dll
+        working-directory: packages/desktop
+        run: |
+          choco install ffmpeg --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg install failed' }
+          $env:PATH += ';C:\ProgramData\chocolatey\bin'
+          $env:PATH = "$PWD/vendor/x86_64/vulkan;$env:PATH"
+          python scripts/check-previews.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Range fixture failed' }
+      - name: Make the portable ZIP
+        run: |
+          $folder = New-Item -ItemType Directory -Force AIOStreams-Custom
+          New-Item -ItemType File "$folder/.portable" | Out-Null
+          Copy-Item packages/desktop/target/release/aiostreams-desktop.exe "$folder/AIOStreams-Custom.exe"
+          Copy-Item packages/desktop/vendor/x86_64/libmpv-2.dll $folder
+          Copy-Item packages/desktop/vendor/x86_64/vulkan "$folder/vulkan" -Recurse
+          Copy-Item packages/jellyfin-web/dist-standalone "$folder/web" -Recurse
+          Copy-Item packages/desktop/CUSTOM-TESTING.md "$folder/READ-ME.md"
+          Copy-Item packages/desktop/THIRD-PARTY.md $folder
+          Copy-Item packages/desktop/third-party-licenses.html $folder
+          Copy-Item LICENSE $folder
+          Compress-Archive -Path AIOStreams-Custom -DestinationPath AIOStreams-Custom-Windows-x64.zip
+      - uses: actions/upload-artifact@v7
+        with:
+          name: AIOStreams-Custom-Windows-x64
+          path: AIOStreams-Custom-Windows-x64.zip
+          retention-days: 14
+      - name: Publish the test download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $body = "Windows x64 portable seek-preview prototype. Cached debrid only. Extract and launch AIOStreams-Custom.exe. Built from $env:AIOSTREAMS_BUILD_SHA. See READ-ME.md in the ZIP for testing and logs."
+          $body | Set-Content -Path custom-notes.md
+          gh release view desktop-seek-previews-v3 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit desktop-seek-previews-v3 --prerelease --latest=false --title 'AIOStreams Custom — Windows seek previews v3' --notes-file custom-notes.md
+          } else {
+            gh release create desktop-seek-previews-v3 --target $env:AIOSTREAMS_BUILD_SHA --prerelease --latest=false --title 'AIOStreams Custom — Windows seek previews v3' --notes-file custom-notes.md
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'release creation failed' }
+          gh release upload desktop-seek-previews-v3 AIOStreams-Custom-Windows-x64.zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'release upload failed' }

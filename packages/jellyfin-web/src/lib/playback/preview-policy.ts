@@ -1,0 +1,47 @@
+import type { SourceInfo } from '../types';
+
+/** An HTTP URL alone also covers Usenet and future P2P proxies; require metadata. */
+export function previewEligible(source: SourceInfo): boolean {
+  return (
+    source.aiostreams?.type === 'debrid' &&
+    source.aiostreams.cached === true &&
+    !source.IsInfiniteStream &&
+    source.SupportsDirectPlay !== false
+  );
+}
+
+export interface PreviewImage {
+  bucket: number;
+  position: number;
+  covers_until: number;
+  image: string;
+}
+
+/** A keyframe preview represents the interval up to its requested seek time.
+ * The UI labels the actual sampled time; half a step covers the bucket edges. */
+export function closestPreview(
+  images: ReadonlyMap<number, PreviewImage>,
+  ms: number,
+  stepMs = 10_000
+): PreviewImage | null {
+  if (!Number.isFinite(ms) || !Number.isFinite(stepMs) || stepMs <= 0)
+    return null;
+  let best: PreviewImage | null = null;
+  let distance = Infinity;
+  const tolerance = stepMs / 2;
+  for (const image of images.values()) {
+    if (
+      !Number.isFinite(image.position) ||
+      !Number.isFinite(image.covers_until)
+    )
+      continue;
+    const start = image.position * 1000;
+    const end = Math.max(image.position, image.covers_until) * 1000;
+    const delta = Math.abs(start - ms);
+    if (ms >= start - tolerance && ms <= end + tolerance && delta < distance) {
+      best = image;
+      distance = delta;
+    }
+  }
+  return best;
+}

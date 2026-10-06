@@ -1,5 +1,16 @@
 /** `external` marks what the player in its own window sends. */
 export type ShellMessage =
+  | { type: 'preview-status'; session: string; state: string; step_ms: number }
+  | {
+      type: 'preview-frame';
+      session: string;
+      bucket: number;
+      position: number;
+      covers_until: number;
+      image: string;
+      cached: boolean;
+      elapsed_ms: number;
+    }
   | { type: 'mpv-prop'; name: string; data: unknown; external?: boolean }
   | { type: 'mpv-event'; name: string; external?: boolean }
   | {
@@ -48,6 +59,8 @@ export type MediaKey =
 
 /** The AIOStreams desktop app's bridge to mpv. */
 interface ShellBridge {
+  seekPreviews?: boolean;
+  custom?: boolean;
   protocol: number;
   version: string;
   platform: string;

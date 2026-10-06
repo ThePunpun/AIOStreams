@@ -498,6 +498,7 @@ export const settings = {
   subtitle,
   subtitleStyle,
   desktop: {
+    seekPreviews: device<boolean>('aiostreams-custom-seek-previews', true),
     updateChannel: device<UpdateChannelSetting>(
       'aiostreams-desktop-update-channel',
       'installed',

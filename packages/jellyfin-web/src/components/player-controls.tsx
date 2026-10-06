@@ -68,6 +68,8 @@ import { SyncByEar, SyncToLine } from './subtitle-sync';
 import { RATES, usePlayerKeys } from './player-keys';
 import { chapterAt, type Chapter } from '../lib/playback/chapters';
 import type { BaseItemDto, MediaSegmentDto } from '../lib/types';
+import { closestPreview } from '../lib/playback/preview-policy';
+import type { SeekPreviews } from '../lib/hosts/shell/previews';
 
 const IDLE_MS = 2000;
 const SKIP_BUTTON_MS = 8000;
@@ -156,6 +158,8 @@ function SeekBar({
   chapters,
   onSeek,
   onStep,
+  onInteraction,
+  previews,
 }: {
   positionMs: number;
   durationMs: number;
@@ -165,15 +169,146 @@ function SeekBar({
   onSeek(ms: number): void;
   /** The arrow keys skip as the skip buttons do. */
   onStep(direction: number): void;
+  onInteraction(active: boolean): void;
+  previews?: SeekPreviews;
 }) {
   const bar = React.useRef<HTMLDivElement>(null);
+  const tooltip = React.useRef<HTMLDivElement>(null);
+  const [tooltipWidth, setTooltipWidth] = React.useState(0);
   const [hover, setHover] = React.useState<number | null>(null);
   const [drag, setDrag] = React.useState<number | null>(null);
+  const target = drag ?? hover;
+  const stepMs = previews?.stepMs ?? 10_000;
+  const targetBucket = target === null ? null : Math.floor(target / stepMs);
+  const currentImage =
+    target !== null && previews?.enabled
+      ? closestPreview(previews.images, target, stepMs)
+      : null;
+  const preview = currentImage;
+  const showSpinner =
+    target !== null &&
+    previews?.enabled &&
+    !preview &&
+    previews.status !== 'unavailable';
+  const interacting = hover !== null || drag !== null;
+  React.useEffect(() => {
+    onInteraction(interacting);
+  }, [interacting, onInteraction]);
+  const tooltipShown = target !== null && durationMs > 0;
+  const previewBox = !!(
+    preview ||
+    (previews?.enabled && previews.status !== 'unavailable')
+  );
+  React.useLayoutEffect(() => {
+    const el = tooltip.current;
+    if (!tooltipShown || !el) return;
+    const measure = () => setTooltipWidth(el.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [tooltipShown]);
+  const requestedAt = React.useRef(performance.now());
+  const report = previews?.report;
+  const request = previews?.request;
+  const session = previews?.session;
+  const latestTarget = useLatest(target);
+  const sampled = useLatest(currentImage);
+  const imageElement = React.useRef<HTMLImageElement>(null);
+  const reportedDisplay = React.useRef('');
+  const [settled, setSettled] = React.useState<{
+    session: string;
+    bucket: number;
+    target: number;
+    started: number;
+  } | null>(null);
+  React.useEffect(() => {
+    requestedAt.current = performance.now();
+    setSettled(null);
+    if (!session || !previews?.enabled || targetBucket === null) {
+      request?.(null);
+      return;
+    }
+    // Cached images display immediately. Settle only new remote requests; issued seeks finish.
+    const timer = setTimeout(() => {
+      const ms = latestTarget.current;
+      if (ms === null) return;
+      const image = sampled.current;
+      setSettled({
+        session,
+        bucket: targetBucket,
+        target: ms,
+        started: requestedAt.current,
+      });
+      report?.(
+        image
+          ? image.bucket === targetBucket
+            ? 'cache-hit'
+            : 'approximate'
+          : 'miss',
+        ms,
+        performance.now() - requestedAt.current,
+        image ? image.position * 1000 : undefined
+      );
+      request?.(image ? null : ms);
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [
+    session,
+    previews?.enabled,
+    targetBucket,
+    stepMs,
+    request,
+    report,
+    sampled,
+    latestTarget,
+  ]);
+  const reportDisplayed = React.useCallback(() => {
+    if (
+      settled?.session !== session ||
+      settled?.bucket !== targetBucket ||
+      !currentImage ||
+      !imageElement.current?.complete ||
+      !imageElement.current.naturalWidth
+    )
+      return;
+    const key = `${settled.started}:${currentImage.bucket}:${currentImage.position}`;
+    if (reportedDisplay.current === key) return;
+    reportedDisplay.current = key;
+    report?.(
+      'display',
+      settled.target,
+      performance.now() - settled.started,
+      currentImage.position * 1000
+    );
+  }, [settled, session, targetBucket, currentImage, report]);
+  React.useEffect(reportDisplayed, [reportDisplayed]);
+  React.useEffect(() => () => request?.(null), [request]);
+  const wasInteracting = React.useRef(false);
+  React.useEffect(() => {
+    if (wasInteracting.current === interacting) return;
+    wasInteracting.current = interacting;
+    report?.(
+      interacting ? 'timeline-enter' : 'timeline-leave',
+      latestTarget.current ?? 0,
+      0
+    );
+  }, [interacting, report, latestTarget]);
   const at = (clientX: number) => {
     const rect = bar.current?.getBoundingClientRect();
     if (!rect || !durationMs) return 0;
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     return ratio * durationMs;
+  };
+  const inside = (e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = bar.current?.getBoundingClientRect();
+    return (
+      !!rect &&
+      e.clientX >= rect.left &&
+      e.clientX <= rect.right &&
+      e.clientY >= rect.top &&
+      e.clientY <= rect.bottom
+    );
   };
   const percent = (ms: number) =>
     durationMs ? `${Math.min(100, (ms / durationMs) * 100)}%` : '0%';
@@ -197,6 +332,9 @@ function SeekBar({
         e.preventDefault();
         onStep(direction);
       }}
+      onPointerEnter={(e) => {
+        if (e.pointerType !== 'touch') setHover(at(e.clientX));
+      }}
       onPointerDown={(e) => {
         if (!durationMs) return;
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -204,12 +342,18 @@ function SeekBar({
       }}
       onPointerMove={(e) => {
         const ms = at(e.clientX);
-        setHover(ms);
+        setHover(inside(e) ? ms : null);
         if (drag !== null) setDrag(ms);
       }}
-      onPointerUp={() => {
+      onPointerUp={(e) => {
         if (drag !== null) onSeek(drag);
         setDrag(null);
+        if (e.pointerType === 'touch' || !inside(e)) setHover(null);
+      }}
+      onLostPointerCapture={() => setDrag(null)}
+      onPointerCancel={() => {
+        setDrag(null);
+        setHover(null);
       }}
       onPointerLeave={() => setHover(null)}
     >
@@ -256,15 +400,56 @@ function SeekBar({
         className="absolute size-3.5 -translate-x-1/2 rounded-full bg-white opacity-0 shadow transition-opacity group-hover/seek:opacity-100"
         style={{ left: percent(shown), opacity: drag !== null ? 1 : undefined }}
       />
-      {hover !== null && durationMs > 0 && (
+      {tooltipShown && target !== null && (
         <div
+          ref={tooltip}
           data-ui="seek-bar-tooltip"
-          className="pointer-events-none absolute bottom-6 -translate-x-1/2 rounded-md bg-black/80 px-2 py-1 text-xs tabular-nums"
-          style={{ left: percent(hover) }}
+          className="pointer-events-none absolute bottom-6 max-w-full text-xs tabular-nums"
+          style={{
+            width: previewBox ? 'min(240px, 100%)' : undefined,
+            left: `clamp(0px, calc(${percent(target)} - ${tooltipWidth / 2}px), max(0px, 100% - ${tooltipWidth}px))`,
+          }}
         >
-          {segments.find((s) => hover >= s.startMs && hover < s.endMs)?.type ??
-            chapters[chapterAt(chapters, hover)]?.title}{' '}
-          {clock(hover)}
+          {previewBox && (
+            <div className="mb-1.5 flex aspect-video w-full items-center justify-center overflow-hidden rounded-md bg-black/95 shadow-lg">
+              {preview ? (
+                <img
+                  data-ui="seek-preview-image"
+                  ref={imageElement}
+                  onLoad={reportDisplayed}
+                  src={preview.image}
+                  alt={`Preview at ${clock(preview.position * 1000)}`}
+                  className="h-full w-full object-contain"
+                />
+              ) : showSpinner ? (
+                <span
+                  data-ui="seek-preview-loading"
+                  className="flex items-center gap-2 text-white/60"
+                >
+                  <LuLoaderCircle className="size-4 animate-spin" />
+                  Loading preview…
+                </span>
+              ) : null}
+            </div>
+          )}
+          <div className="mx-auto flex w-fit max-w-full items-center justify-center gap-1 rounded-md bg-black/80 px-2 py-1 shadow-sm">
+            <span className="truncate">
+              {segments.find((s) => target >= s.startMs && target < s.endMs)
+                ?.type ?? chapters[chapterAt(chapters, target)]?.title}
+            </span>
+            <span className="shrink-0">{clock(target)}</span>
+          </div>
+          {preview && Math.abs(preview.position * 1000 - target) >= 3000 ? (
+            <div className="mx-auto mt-0.5 w-fit max-w-full rounded px-1.5 py-0.5 bg-black/70 text-center text-[10px] text-white/70">
+              Preview at {clock(preview.position * 1000)}
+            </div>
+          ) : !preview &&
+            previews?.enabled &&
+            previews.status === 'unavailable' ? (
+            <div className="mt-0.5 text-center text-white/50">
+              Preview unavailable
+            </div>
+          ) : null}
         </div>
       )}
     </div>
@@ -837,6 +1022,15 @@ export function PlayerControls({
   const [idle, wake, sleep] = useIdle(IDLE_MS);
   const root = React.useRef<HTMLDivElement>(null);
   const [menus, setMenus] = React.useState(0);
+  const [seekInteracting, setSeekInteracting] = React.useState(false);
+  const onSeekInteraction = React.useCallback(
+    (active: boolean) => {
+      setSeekInteracting(active);
+      // Restart the normal hide delay after leaving the timeline or ending a drag.
+      if (!active) wake();
+    },
+    [wake]
+  );
   const pointerType = React.useRef('mouse');
   const segments = React.useMemo(() => segmentsOf(rawSegments), [rawSegments]);
   // Set while picking the line heard; playback waits, then resumes if it ran.
@@ -851,6 +1045,7 @@ export function PlayerControls({
     !idle ||
     state.paused ||
     menus > 0 ||
+    seekInteracting ||
     !state.started ||
     picking !== null ||
     byEar;
@@ -1204,6 +1399,8 @@ export function PlayerControls({
           {time}
         </p>
         <SeekBar
+          onInteraction={onSeekInteraction}
+          previews={player.seekPreviews}
           positionMs={state.positionMs}
           durationMs={state.durationMs}
           bufferedMs={state.bufferedMs}

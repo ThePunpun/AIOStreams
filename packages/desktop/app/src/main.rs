@@ -81,13 +81,18 @@ fn args() -> Args {
 
 fn app_dir(base: Option<PathBuf>) -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir)
-        .join("AIOStreams Desktop")
+        .join("AIOStreams Custom")
 }
 
 /// A portable copy's own folder. Velopack runs the app from `<root>/current`,
 /// which each update replaces, and marks a portable root with `.portable`.
 fn portable_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    if let Some(dir) = exe.parent()
+        && dir.join(".portable").is_file()
+    {
+        return Some(dir.to_path_buf());
+    }
     let root = exe.parent()?.parent()?;
     root.join(".portable").is_file().then(|| root.to_path_buf())
 }
@@ -450,6 +455,85 @@ pub fn handle(
     };
     let player = player.borrow();
     match message {
+        Inbound::PreviewStart {
+            session,
+            url,
+            source,
+        } => {
+            if preview_session(&session)
+                && url.len() <= 16384
+                && aiostreams_desktop_core::bridge::command(&[
+                    "loadfile".into(),
+                    url.clone().into(),
+                ])
+                .is_ok()
+                && let Some(p) = player.as_ref()
+            {
+                p.previews.start_with_source(session, url, source);
+            }
+        }
+        Inbound::PreviewStop { session } => {
+            if let Some(p) = player.as_ref() {
+                p.previews.stop(&session);
+            }
+        }
+        Inbound::PreviewRequest { session, position } => {
+            if let Some(p) = player.as_ref() {
+                p.previews.request(&session, position);
+            }
+        }
+        Inbound::PreviewHover { session, active } => {
+            if let Some(p) = player.as_ref() {
+                p.previews.hover(&session, active);
+            }
+        }
+        Inbound::PreviewReport {
+            session,
+            event,
+            position,
+            elapsed_ms,
+            reason,
+            sampled_position,
+        } => {
+            if preview_session(&session)
+                && position.is_finite()
+                && elapsed_ms.is_finite()
+                && (0.0..=60000.0).contains(&elapsed_ms)
+                && matches!(
+                    event.as_str(),
+                    "cache-hit"
+                        | "approximate"
+                        | "miss"
+                        | "display"
+                        | "display-cached"
+                        | "display-cold"
+                        | "source-skipped"
+                        | "timeline-enter"
+                        | "timeline-leave"
+                )
+            {
+                let reason = reason
+                    .filter(|s| {
+                        matches!(
+                            s.as_str(),
+                            "debrid-uncached"
+                                | "usenet"
+                                | "p2p"
+                                | "live"
+                                | "unknown"
+                                | "external"
+                                | "infinite"
+                                | "no-direct-play"
+                                | "disabled"
+                        )
+                    })
+                    .unwrap_or_default();
+                if let Some(p) = player.as_ref() {
+                    p.previews.report_display(&session, &event);
+                }
+                log::info!(target: "seek_preview", "session={session} ui={event} reason={reason} position_s={position:.3} sampled_s={:?} elapsed_ms={elapsed_ms:.1}", sampled_position.filter(|v| v.is_finite() && (0.0..=86400.0).contains(v)));
+            }
+        }
         Inbound::MpvCommand {
             args,
             external: to_external,
@@ -566,4 +650,8 @@ pub fn handle(
             log::error!(target: "web", "{message}");
         }
     }
+}
+
+fn preview_session(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
 }

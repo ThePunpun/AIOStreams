@@ -18,6 +18,9 @@ AIOStreams Desktop is licensed under the AGPL-3.0. It ships with:
   the AIOStreams repository. Licensed under the Apache-2.0; its licence text is beside it in
   `vulkan/VulkanRT-License.txt`. Source:
   [KhronosGroup/Vulkan-Loader](https://github.com/KhronosGroup/Vulkan-Loader).
+- **JPEG encoding**, from [jpeg-encoder](https://github.com/vstroebel/jpeg-encoder),
+  under MIT and the Independent JPEG Group licence. This software is based in part on the
+  work of the Independent JPEG Group.
 - **Rust crates** built into the app, under MIT, Apache-2.0 and other permissive licences.
   `third-party-licenses.html` lists each crate with its licence text.
 - **JavaScript libraries** built into the web app in `web` (`Contents/Resources/web` on macOS).

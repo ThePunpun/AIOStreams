@@ -4,8 +4,11 @@ fn main() {
         Ok("windows") => {
             winresource::WindowsResource::new()
                 .set_icon("icons/aiostreams.ico")
-                .set("ProductName", "AIOStreams")
-                .set("FileDescription", "AIOStreams")
+                .set("ProductName", "AIOStreams Custom")
+                .set(
+                    "FileDescription",
+                    "AIOStreams Custom — seek preview prototype",
+                )
                 .compile()
                 .expect("could not embed the Windows resources");
         }

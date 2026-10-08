@@ -10,6 +10,56 @@ use serde_json::Value;
 const FORMAT_STRING: c_int = 1;
 const FORMAT_FLAG: c_int = 3;
 const FORMAT_DOUBLE: c_int = 5;
+const FORMAT_INT64: c_int = 4;
+const FORMAT_NODE_MAP: c_int = 8;
+const FORMAT_BYTE_ARRAY: c_int = 9;
+
+#[repr(C)]
+union NodeValue {
+    string: *mut c_char,
+    flag: c_int,
+    int64: i64,
+    double: c_double,
+    list: *mut NodeList,
+    bytes: *mut ByteArray,
+}
+
+#[repr(C)]
+struct Node {
+    value: NodeValue,
+    format: c_int,
+}
+
+#[repr(C)]
+struct NodeList {
+    count: c_int,
+    values: *mut Node,
+    keys: *mut *mut c_char,
+}
+
+#[repr(C)]
+struct ByteArray {
+    data: *mut c_void,
+    size: usize,
+}
+
+struct OwnedNode {
+    node: Node,
+    free: unsafe extern "C" fn(*mut Node),
+}
+
+impl Drop for OwnedNode {
+    fn drop(&mut self) {
+        // SAFETY: mpv owns the result's contents and this is its only release.
+        unsafe { (self.free)(&raw mut self.node) };
+    }
+}
+
+pub struct Screenshot {
+    pub width: u16,
+    pub height: u16,
+    pub rgb: Vec<u8>,
+}
 
 const EVENT_SHUTDOWN: c_int = 1;
 const EVENT_LOG_MESSAGE: c_int = 2;
@@ -56,6 +106,8 @@ struct Api {
     terminate_destroy: unsafe extern "C" fn(Handle),
     set_option_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     command: unsafe extern "C" fn(Handle, *mut *const c_char) -> c_int,
+    command_ret: unsafe extern "C" fn(Handle, *mut *const c_char, *mut Node) -> c_int,
+    free_node_contents: unsafe extern "C" fn(*mut Node),
     set_property_string: unsafe extern "C" fn(Handle, *const c_char, *const c_char) -> c_int,
     get_property: unsafe extern "C" fn(Handle, *const c_char, c_int, *mut c_void) -> c_int,
     observe_property: unsafe extern "C" fn(Handle, u64, *const c_char, c_int) -> c_int,
@@ -90,6 +142,8 @@ impl Api {
             terminate_destroy: sym!("mpv_terminate_destroy"),
             set_option_string: sym!("mpv_set_option_string"),
             command: sym!("mpv_command"),
+            command_ret: sym!("mpv_command_ret"),
+            free_node_contents: sym!("mpv_free_node_contents"),
             set_property_string: sym!("mpv_set_property_string"),
             get_property: sym!("mpv_get_property"),
             observe_property: sym!("mpv_observe_property"),
@@ -224,6 +278,110 @@ impl Mpv {
         ptrs.push(ptr::null());
         // SAFETY: a NULL-terminated array of valid strings.
         self.check(unsafe { (self.api.command)(self.handle, ptrs.as_mut_ptr()) })
+    }
+
+    /// Return a bounded RGB screenshot without creating any temporary image file.
+    pub fn screenshot(&self) -> Result<Screenshot, String> {
+        let owned = ["screenshot-raw", "video", "rgb24"]
+            .map(cstring)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut args: Vec<_> = owned.iter().map(|s| s.as_ptr()).collect();
+        args.push(ptr::null());
+        let mut result = OwnedNode {
+            node: Node {
+                value: NodeValue { int64: 0 },
+                format: 0,
+            },
+            free: self.api.free_node_contents,
+        };
+        // SAFETY: the arguments are NULL-terminated and result is initialized to NONE.
+        let status =
+            unsafe { (self.api.command_ret)(self.handle, args.as_mut_ptr(), &raw mut result.node) };
+        if status < 0 {
+            // Older supported mpv versions return bgr0 and do not accept a format argument.
+            result = OwnedNode {
+                node: Node {
+                    value: NodeValue { int64: 0 },
+                    format: 0,
+                },
+                free: self.api.free_node_contents,
+            };
+            args[2] = ptr::null();
+            // SAFETY: the shortened arguments are NULL-terminated and result is NONE.
+            self.check(unsafe {
+                (self.api.command_ret)(self.handle, args.as_mut_ptr(), &raw mut result.node)
+            })?;
+        }
+        if result.node.format != FORMAT_NODE_MAP {
+            return Err("screenshot result is not a map".into());
+        }
+        // SAFETY: the union member is determined by format; contents live until result drops.
+        let list = unsafe { result.node.value.list.as_ref() }.ok_or("missing screenshot map")?;
+        if !(1..=32).contains(&list.count) || list.values.is_null() || list.keys.is_null() {
+            return Err("invalid screenshot map".into());
+        }
+        let mut width = None;
+        let mut height = None;
+        let mut stride = None;
+        let mut bytes = None;
+        let mut format = String::new();
+        for i in 0..list.count as usize {
+            // SAFETY: mpv's node map contains count valid keys and values.
+            let (key, value) = unsafe { (text(*list.keys.add(i)), &*list.values.add(i)) };
+            match (key.as_str(), value.format) {
+                // SAFETY: each accessed union member matches the node's format.
+                ("w", FORMAT_INT64) => width = Some(unsafe { value.value.int64 }),
+                ("h", FORMAT_INT64) => height = Some(unsafe { value.value.int64 }),
+                ("stride", FORMAT_INT64) => stride = Some(unsafe { value.value.int64 }),
+                ("format", FORMAT_STRING) => format = unsafe { text(value.value.string) },
+                ("data", FORMAT_BYTE_ARRAY) => bytes = unsafe { value.value.bytes.as_ref() },
+                _ => {}
+            }
+        }
+        let (Some(width), Some(height), Some(stride), Some(bytes)) = (width, height, stride, bytes)
+        else {
+            return Err("incomplete screenshot".into());
+        };
+        if !matches!(format.as_str(), "rgb24" | "bgr0" | "rgb0")
+            || !(1..=1024).contains(&width)
+            || !(1..=4096).contains(&height)
+        {
+            return Err("unsupported screenshot dimensions or format".into());
+        }
+        let channels = if format == "rgb24" { 3 } else { 4 };
+        let row = width as usize * channels;
+        let height = height as usize;
+        if stride < row as i64
+            || stride > 16384
+            || bytes.data.is_null()
+            || bytes.size > 16 * 1024 * 1024
+            || (height - 1) * stride as usize + row > bytes.size
+        {
+            return Err("invalid screenshot stride or buffer".into());
+        }
+        let mut rgb = Vec::with_capacity(width as usize * height * 3);
+        // SAFETY: size and stride bounds above keep every copied row inside mpv's allocation.
+        let data = unsafe { std::slice::from_raw_parts(bytes.data.cast::<u8>(), bytes.size) };
+        for y in 0..height {
+            let row = &data[y * stride as usize..y * stride as usize + row];
+            if channels == 3 {
+                rgb.extend_from_slice(row);
+            } else {
+                for pixel in row.as_chunks::<4>().0 {
+                    if format == "bgr0" {
+                        rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+                    } else {
+                        rgb.extend_from_slice(&pixel[..3]);
+                    }
+                }
+            }
+        }
+        Ok(Screenshot {
+            width: width as u16,
+            height: height as u16,
+            rgb,
+        })
     }
 
     pub fn set_property(&self, name: &str, value: &str) -> Result<(), String> {

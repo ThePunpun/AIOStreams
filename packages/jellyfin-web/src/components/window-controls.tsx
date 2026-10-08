@@ -66,6 +66,11 @@ export function WindowControls() {
     'flex h-8 w-11 items-center justify-center rounded-lg text-[0.95rem] text-white/85 transition-colors hover:text-white active:text-white';
   return (
     <>
+      {shell.custom && (
+        <div className="pointer-events-none fixed left-3 top-2 z-[9999] rounded bg-black/70 px-2 py-1 text-xs text-white/80">
+          AIOStreams Custom
+        </div>
+      )}
       {!maximized && !fullscreen && (
         <div
           aria-hidden

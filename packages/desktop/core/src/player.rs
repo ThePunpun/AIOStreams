@@ -30,6 +30,7 @@ enum Request {
 
 /// Makes the page's mpv calls on a thread of its own: the caller may be the render thread mpv waits on.
 pub struct Player {
+    pub previews: crate::previews::Previews,
     mpv: Arc<Mpv>,
     quit: Arc<AtomicBool>,
     events: Option<JoinHandle<()>>,
@@ -59,6 +60,8 @@ impl Player {
             mpv.observe(name, *kind, id as u64)?;
         }
         let versions = (text(&mpv, "mpv-version"), text(&mpv, "ffmpeg-version"));
+        log::info!(target: "seek_preview", "decoder mpv={} ffmpeg={}", versions.0.as_deref().unwrap_or("unknown"), versions.1.as_deref().unwrap_or("unknown"));
+        let previews = crate::previews::Previews::new(library, mpv.clone(), emit.clone())?;
         log::info!(
             "mpv started version=\"{}\" ffmpeg={}",
             versions.0.as_deref().unwrap_or_default(),
@@ -81,6 +84,7 @@ impl Player {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            previews,
             mpv,
             quit,
             events: Some(events),

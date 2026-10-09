@@ -66,6 +66,32 @@ function preserveEmbeddedSdTitle(
   return recovered;
 }
 
+/** Decode one layer of XML entities found in indexer release names for parsing. */
+export function decodeReleaseName(title: string): string {
+  const named: Record<string, string> = {
+    amp: '&',
+    apos: "'",
+    quot: '"',
+    lt: '<',
+    gt: '>',
+  };
+  return title.replace(
+    /&(#(?:[xX][0-9a-fA-F]+|[0-9]+)|amp|apos|quot|lt|gt);/g,
+    (whole, entity: string) => {
+      if (entity[0] !== '#') return named[entity];
+      const hex = entity[1].toLowerCase() === 'x';
+      const value = Number.parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10);
+      if (
+        value <= 0 ||
+        value > 0x10ffff ||
+        (value >= 0xd800 && value <= 0xdfff)
+      )
+        return whole;
+      return String.fromCodePoint(value);
+    }
+  );
+}
+
 // Sized to cover the working set of a busy request without retaining much:
 // entries are small objects and the hit rate comes from repetition, not volume.
 const MAX_ENTRIES = 10_000;
@@ -106,7 +132,7 @@ export function stripRepostSuffixes(name: string): string {
 }
 
 /**
- * Memoised {@link parseTorrentTitle}.
+ * Memoised torrent-title parsing.
  *
  * The same names are parsed repeatedly: builtins parse every file inside every
  * torrent and then the wrapper re-parses the names it kept, via a different
@@ -125,7 +151,11 @@ export function parseTorrentTitleCached(title: string): ParsedResult {
     return cached;
   }
 
-  const parsed = preserveEmbeddedSdTitle(name, parseTorrentTitle(name));
+  const decodedName = decodeReleaseName(name);
+  const parsed = preserveEmbeddedSdTitle(
+    decodedName,
+    parseTorrentTitle(decodedName)
+  );
 
   if (cache.size >= MAX_ENTRIES) {
     const oldest = cache.keys().next().value;

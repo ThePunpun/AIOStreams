@@ -23,6 +23,8 @@
     version: __VERSION__,
     platform: __PLATFORM__,
     device: __DEVICE__,
+    seekPreviews: true,
+    custom: true,
     send,
     subscribe(listener) {
       listeners.add(listener);

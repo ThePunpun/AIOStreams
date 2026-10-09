@@ -3,7 +3,11 @@ import { currentHost } from './hosts';
 
 // The desktop app is its own client, on the computer it runs on.
 const shell = window.aiostreamsDesktop;
-const CLIENT_NAME = shell ? 'AIOStreams Desktop' : 'AIOStreams Web';
+const CLIENT_NAME = shell?.custom
+  ? 'AIOStreams Custom'
+  : shell
+    ? 'AIOStreams Desktop'
+    : 'AIOStreams Web';
 const CLIENT_VERSION = shell?.version ?? '1.0.0';
 const DEVICE_KEY = 'aiostreams-web-device';
 

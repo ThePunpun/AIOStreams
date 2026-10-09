@@ -31,6 +31,16 @@ export function chapterAt(chapters: Chapter[], ms: number): number {
   return index;
 }
 
+/** An unnamed chapter still has a useful number; absent chapters have no label. */
+export function chapterLabel(
+  chapters: Chapter[],
+  ms: number
+): string | undefined {
+  const index = chapterAt(chapters, ms);
+  const chapter = chapters[index];
+  return chapter ? chapter.title.trim() || `Chapter ${index + 1}` : undefined;
+}
+
 // A whole title, or the words before its first punctuation mark, once
 // lowercased and stripped of numbers, so "OP 2" and "OP - Song" match but
 // "The Opening of the Gates" and "Opening Night" do not.

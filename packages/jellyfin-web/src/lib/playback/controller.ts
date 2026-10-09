@@ -5,6 +5,7 @@ import type { SubtitleStyle } from '../settings';
 import type { SubtitleLine } from '../subtitles/cues';
 import type { PlaybackPrefs } from '../user-config';
 import type { BaseItemDto, MediaStream, SourceInfo } from '../types';
+import type { SeekPreviews } from '../hosts/shell/previews';
 
 export interface Track {
   id: string;
@@ -42,6 +43,7 @@ export const browserFeatures: readonly PlayerFeature[] =
 
 /** One set of controls over whichever player the page runs in. */
 export interface PlayerController {
+  seekPreviews?: SeekPreviews;
   state: PlayerState;
   audioTracks: Track[];
   subtitleTracks: Track[];

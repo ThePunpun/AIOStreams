@@ -200,6 +200,9 @@ function PlaybackSection() {
   const { prefs, update } = usePlaybackPrefs();
   const [seekStep, setSeekStep] = useSetting(settings.seekStep);
   const [volumeStep, setVolumeStep] = useSetting(settings.volumeStep);
+  const [seekPreviews, setSeekPreviews] = useSetting(
+    settings.desktop.seekPreviews
+  );
   const [autoPlay, setAutoPlay] = useSetting(settings.autoPlayFirst);
   const [nextPrompt, setNextPrompt] = useSetting(settings.next.prompt);
   const [nextLead, setNextLead] = useSetting(settings.next.lead);
@@ -355,6 +358,15 @@ function PlaybackSection() {
         )}
       </SettingsCard>
       <SettingsCard title="Controls" description={ON_DEVICE}>
+        {shell && window.aiostreamsDesktop?.seekPreviews && (
+          <Switch
+            side="right"
+            label="Seek previews"
+            help="Show thumbnail previews when hovering or dragging the timeline. Available for supported streams in the built-in desktop player. Preparing previews uses extra data and processing."
+            value={seekPreviews}
+            onValueChange={setSeekPreviews}
+          />
+        )}
         <Select
           label="Skip length"
           help="How far the skip buttons and the arrow keys jump."

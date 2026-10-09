@@ -244,7 +244,7 @@ pub fn run(app: App) {
     let video = platform::VideoSurface::new().unwrap_or_else(|e| platform::fatal(&e));
     video.widget().set_overflow(gtk4::Overflow::Hidden);
     window.set_child(Some(video.widget()));
-    let started = start_player(&video, &paths.mpv, |message| {
+    let started = start_player(&video, &paths.mpv, &data_dir, |message| {
         if let Outbound::MpvProp { name, data, .. } = &message
             && name == "idle-active"
             && data == true

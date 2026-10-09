@@ -37,6 +37,7 @@ import { mergeSources, type SourceBatch } from './merger.js';
 import { filterCandidatesBySeasonType, selectBestRecord } from './selector.js';
 import { buildAnimeEntry } from './builder.js';
 import { getSiblingTitles } from './sibling-titles.js';
+import { getEntryEpisodeTitles } from './episode-titles.js';
 
 const logger = createLogger('anime-database');
 
@@ -404,6 +405,16 @@ export class AnimeDatabase {
         ...related.flat(),
       ]);
       if (titles.length) entry.siblingTitles = titles;
+      if (
+        season !== undefined &&
+        ['imdbId', 'thetvdbId', 'themoviedbId'].includes(idType)
+      ) {
+        // Related records supply title uniqueness, never selection coordinates.
+        entry.localEpisodeTitles = getEntryEpisodeTitles(chosen, [
+          ...candidates,
+          ...related.flat(),
+        ]);
+      }
     }
 
     this.cache.set(key, entry);
@@ -473,7 +484,7 @@ function buildSelectedEntry(
   idValue: IdValue
 ): AnimeEntry {
   const entry = buildAnimeEntry(chosen);
-  // match keys follow this id, so a hint-found entry must not carry another
+  // Match keys follow this ID even when the record was found through a hint.
   if (idType === 'imdbId') {
     entry.mappings = { ...entry.mappings, imdbId: String(idValue) };
   }

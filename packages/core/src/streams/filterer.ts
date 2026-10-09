@@ -64,6 +64,9 @@ import {
   matchingReleaseEpisodeFloor,
   matchingReleaseSeason,
 } from './title-conflict-episodes.js';
+import { isLocalEpisodeWrong } from '../anime-database/episode-titles.js';
+import { isSeasonAbsoluteEpisodePairWrong } from '../anime-database/episode-pairs.js';
+import { parseTorrentTitleCached } from '../parser/title.js';
 
 const logger = createLogger('filterer');
 
@@ -515,6 +518,7 @@ class StreamFilterer {
         year: requestedMetadata.year,
         hasGenres: !!requestedMetadata.genres?.length,
         originalLanguage: originalLanguage,
+        daysSinceRelease: context.toExpressionContext().daysSinceRelease,
       });
     }
 
@@ -622,7 +626,9 @@ class StreamFilterer {
       if (!match) {
         const title = normaliseTitle(
           preprocessTitle(
-            stream.parsedFile?.title ?? '',
+            isAnime
+              ? getAnimeReleaseTitle(stream.parsedFile?.title ?? '', stream.filename, context.animeEntry)
+              : stream.parsedFile?.title ?? '',
             [stream.filename, stream.folderName],
             requestedTitleStrings
           )
@@ -1504,6 +1510,47 @@ class StreamFilterer {
         requestedMetadata?.episodeAirDates?.length
       ) {
         return requestedMetadata.episodeAirDates.includes(parsedDate);
+      }
+
+      if (
+        stream.parsedFile &&
+        isSeasonAbsoluteEpisodePairWrong(stream.filename, stream.parsedFile, {
+          season: requestedSeason,
+          episode: requestedEpisode,
+          absoluteEpisode: requestedMetadata?.absoluteEpisode,
+        })
+      )
+        return false;
+
+      if (
+        stream.parsedFile &&
+        isLocalEpisodeWrong(stream.parsedFile, {
+          season: requestedSeason,
+          episode: requestedEpisode,
+          absoluteEpisode: requestedMetadata?.absoluteEpisode,
+          relativeAbsoluteEpisode: requestedMetadata?.relativeAbsoluteEpisode,
+          localEpisodeTitles: requestedMetadata?.localEpisodeTitles,
+        })
+      ) {
+        const folder = stream.folderName
+          ? parseTorrentTitleCached(stream.folderName)
+          : undefined;
+        if (
+          !folder ||
+          isLocalEpisodeWrong(
+            stream.parsedFile,
+            {
+              season: requestedSeason,
+              episode: requestedEpisode,
+              absoluteEpisode: requestedMetadata?.absoluteEpisode,
+              relativeAbsoluteEpisode:
+                requestedMetadata?.relativeAbsoluteEpisode,
+              localEpisodeTitles: requestedMetadata?.localEpisodeTitles,
+            },
+            folder
+          )
+        )
+          return false;
       }
 
       let seasons = stream.parsedFile?.seasons;

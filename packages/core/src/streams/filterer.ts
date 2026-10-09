@@ -34,9 +34,9 @@ import {
 import { reconcileEpisodeFilename } from '../parser/episode-filename.js';
 import { normaliseCountryCode } from '../utils/countries.js';
 import {
+  withoutSeriesSubtitle,
   isEpisodeTitleLanguageTag,
   stripEpisodeTitleLabel,
-  withoutSeriesSubtitle,
 } from '../parser/episode-title.js';
 import { partial_ratio } from 'fuzzball';
 import { formatBitrate, formatBytes } from '../formatters/utils.js';
@@ -61,13 +61,19 @@ import {
 } from './title-conflicts.js';
 import { resolveConflictEvidence } from './title-conflict-evidence.js';
 import type { TitleConflict } from '../metadata/utils.js';
+import { isLocalEpisodeWrong } from '../anime-database/episode-titles.js';
+import { isSeasonAbsoluteEpisodePairWrong } from '../anime-database/episode-pairs.js';
+import { parseTorrentTitleCached } from '../parser/title.js';
 import {
   matchingReleaseEpisodeFloor,
   matchingReleaseSeason,
 } from './title-conflict-episodes.js';
-import { isLocalEpisodeWrong } from '../anime-database/episode-titles.js';
-import { isSeasonAbsoluteEpisodePairWrong } from '../anime-database/episode-pairs.js';
-import { parseTorrentTitleCached } from '../parser/title.js';
+
+import {
+  recoverAnimeRelease,
+  isRecoveredAnimeEpisodeWrong,
+} from '../parser/anime-release.js';
+import { recoverMovieRelease } from '../parser/release.js';
 
 const logger = createLogger('filterer');
 
@@ -429,6 +435,10 @@ class StreamFilterer {
    * Apply configured stream filters using request metadata, including
    * alias-specific identity checks when ambiguous results are discarded.
    */
+  /**
+   * Recover request-anchored filename metadata and apply the user's stream
+   * filters, recording rejection reasons and phase timings.
+   */
   public async filter(
     streams: ParsedStream[],
     context: StreamContext
@@ -532,6 +542,7 @@ class StreamFilterer {
       this.requestedTitleStrings.set(requestedMetadata, requestedTitleStrings);
     }
 
+    const recoveredEpisodeMismatches = new Set<ParsedStream>();
     if (requestedTitleStrings.length) {
       let reconcileSliceStart = performance.now();
       for (const stream of streams) {
@@ -549,6 +560,70 @@ class StreamFilterer {
           );
           if (recovered !== stream.parsedFile) {
             stream.parsedFile = recovered;
+          }
+        }
+        if (type === 'movie' && stream.filename) {
+          const original = parseTorrentTitleCached(stream.filename);
+          const recovered = recoverMovieRelease(stream.filename, original, {
+            mediaType: type,
+            titles: requestedTitleStrings,
+          });
+          // Merged folder/inner-file coordinates must not be erased by a name
+          // recovery unless the raw filename itself contains those coordinates.
+          if (
+            recovered !== original &&
+            !stream.parsedFile.seasons?.length &&
+            (!stream.parsedFile.episodes?.length ||
+              (stream.parsedFile.episodes.length === 1 &&
+                original.episodes?.length === 1 &&
+                stream.parsedFile.episodes[0] === original.episodes[0]))
+          ) {
+            stream.parsedFile = {
+              ...stream.parsedFile,
+              title: recovered.title,
+              episodes: recovered.episodes,
+              episodeTitle: recovered.episodeTitle,
+              releaseGroup: recovered.group ?? stream.parsedFile.releaseGroup,
+            };
+          }
+        }
+        if (
+          context.isAnime &&
+          stream.filename &&
+          (stream.type === 'usenet' || stream.type === 'stremio-usenet')
+        ) {
+          const original = parseTorrentTitleCached(stream.filename);
+          const recovered = recoverAnimeRelease(stream.filename, original, {
+            isAnime: context.isAnime && (type === 'series' || type === 'anime'),
+            episode: parsedId?.episode ? Number(parsedId.episode) : undefined,
+            absoluteEpisode: requestedMetadata?.absoluteEpisode,
+            titles: requestedTitleStrings,
+          });
+          // A raw filename mismatch remains evidence even when merged folder
+          // coordinates must be preserved instead of replaced by recovery.
+          if (
+            recovered !== original &&
+            isRecoveredAnimeEpisodeWrong(recovered, {
+              episode: parsedId?.episode ? Number(parsedId.episode) : undefined,
+              absoluteEpisode: requestedMetadata?.absoluteEpisode,
+              relativeAbsoluteEpisode:
+                requestedMetadata?.relativeAbsoluteEpisode,
+            })
+          )
+            recoveredEpisodeMismatches.add(stream);
+          if (
+            recovered !== original &&
+            (!stream.parsedFile.episodes?.length ||
+              (stream.parsedFile.episodes.length === 1 &&
+                stream.parsedFile.episodes[0] === recovered.episodes?.[0])) &&
+            !stream.parsedFile.seasons?.length
+          ) {
+            stream.parsedFile = {
+              ...stream.parsedFile,
+              title: recovered.title,
+              episodes: recovered.episodes,
+              releaseGroup: recovered.group ?? stream.parsedFile.releaseGroup,
+            };
           }
         }
         const reconciled = reconcileParsedName(
@@ -605,6 +680,83 @@ class StreamFilterer {
       }
     }
 
+    const getAnimeEntryBareEpisodeAlias = (
+      stream: ParsedStream
+    ): string | undefined => {
+      const animeEpisode = context.animeEpisode;
+      const animeEntry = context.animeEntry;
+
+      if (
+        !isAnime ||
+        !animeEntry ||
+        animeEpisode === undefined ||
+        (!stream.filename && !stream.folderName)
+      ) {
+        return undefined;
+      }
+
+      // Keep token boundaries while folding punctuation/separators so
+      // bare-episode filenames can be matched conservatively.
+      const normaliseBareEpisodeText = (value: string) =>
+        value
+          .normalize('NFKD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/&/g, ' and ')
+          // Keep fractional episode numbers distinct from integer episodes.
+          .replace(/(\d)\.(\d+)(?=(?:v\d+)?(?![\p{L}\p{N}]))/gu, '$1decimal$2')
+          .replace(/[^\p{L}\p{N}]+/gu, ' ')
+          .trim();
+
+      const filenameParts = stream.filename?.split(/[\\/]/);
+      const basename = filenameParts?.pop();
+      const normalisedFilename = normaliseBareEpisodeText(basename ?? '');
+      const normalisedFolder = normaliseBareEpisodeText(
+        [stream.folderName, ...(filenameParts ?? [])].filter(Boolean).join(' ')
+      );
+      // Prefer the full matching alias over a shorter suffix alias.
+      const aliases = [animeEntry.title, ...(animeEntry.synonyms ?? [])]
+        .filter((title): title is string => !!title)
+        .sort(
+          (a, b) =>
+            normaliseBareEpisodeText(b).length -
+            normaliseBareEpisodeText(a).length
+        );
+
+      const matchedAlias = aliases.find((alias) => {
+        const normalisedAlias = normaliseBareEpisodeText(alias);
+        if (!normalisedAlias) return false;
+
+        const escapedAlias = normalisedAlias.replace(
+          /[.*+?^${}()|[\]\\]/g,
+          '\\$&'
+        );
+
+        const episodePattern = `(?:e\\s*)?0*${normaliseBareEpisodeText(String(animeEpisode))}(?:v\\d+)?`;
+        const aliasAndEpisode = new RegExp(
+          `(?:^|\\s)${escapedAlias}\\s+${episodePattern}(?:\\s|$)`,
+          'u'
+        );
+        // With no selected filename, the folder describes the release.
+        if (!stream.filename) return aliasAndEpisode.test(normalisedFolder);
+        return (
+          aliasAndEpisode.test(normalisedFilename) ||
+          (new RegExp(`(?:^|\\s)${escapedAlias}(?:\\s|$)`, 'u').test(
+            normalisedFolder
+          ) &&
+            new RegExp(`^${episodePattern}(?:\\s|$)`, 'u').test(
+              normalisedFilename
+            ))
+        );
+      });
+
+      if (!matchedAlias) {
+        return undefined;
+      }
+
+      return matchedAlias;
+    };
+
     const titleMatchingOptions = {
       mode: 'exact',
       similarityThreshold: 0.85,
@@ -626,13 +778,18 @@ class StreamFilterer {
       let match = titleMatches.get(stream);
       if (!match) {
         const title = normaliseTitle(
-          preprocessTitle(
-            isAnime
-              ? getAnimeReleaseTitle(stream.parsedFile?.title ?? '', stream.filename, context.animeEntry)
-              : stream.parsedFile?.title ?? '',
-            [stream.filename, stream.folderName],
-            requestedTitleStrings
-          )
+          getAnimeEntryBareEpisodeAlias(stream) ??
+            preprocessTitle(
+              isAnime
+                ? getAnimeReleaseTitle(
+                    stream.parsedFile?.title ?? '',
+                    stream.filename,
+                    context.animeEntry
+                  )
+                : (stream.parsedFile?.title ?? ''),
+              [stream.filename, stream.folderName],
+              requestedTitleStrings
+            )
         );
         const result = titleMatchWithLang(
           title,
@@ -772,8 +929,8 @@ class StreamFilterer {
               streams
                 .filter(
                   (stream) =>
-                    stream.parsedFile?.title &&
-                    stream.filename &&
+                    (getAnimeEntryBareEpisodeAlias(stream) ||
+                      (stream.parsedFile?.title && stream.filename)) &&
                     (!titleOptions?.addons?.length ||
                       titleOptions.addons.includes(
                         stream.addon?.preset?.id ?? ''
@@ -1286,13 +1443,20 @@ class StreamFilterer {
       }
 
       const animeReleaseTitle = getAnimeReleaseTitle(
-        streamTitle ?? animeEntryBareEpisodeAlias ?? '', stream.filename,
+        streamTitle ?? animeEntryBareEpisodeAlias ?? '',
+        stream.filename,
         isAnime ? context.animeEntry : null
       );
       if (
         siblingTitleKeys.has(normaliseTitle(animeReleaseTitle)) &&
-        !isExplicitAnimeParentTitle(animeReleaseTitle, context.animeEntry, stream.parsedFile?.seasons, Number(parsedId?.season))
-      ) return false;
+        !isExplicitAnimeParentTitle(
+          animeReleaseTitle,
+          context.animeEntry,
+          stream.parsedFile?.seasons,
+          Number(parsedId?.season)
+        )
+      )
+        return false;
 
       const { key: normalisedStreamTitle, result } = releaseTitleMatch(stream);
 
@@ -1395,83 +1559,6 @@ class StreamFilterer {
       );
     };
 
-    const getAnimeEntryBareEpisodeAlias = (
-      stream: ParsedStream
-    ): string | undefined => {
-      const animeEpisode = context.animeEpisode;
-      const animeEntry = context.animeEntry;
-
-      if (
-        !isAnime ||
-        !animeEntry ||
-        animeEpisode === undefined ||
-        (!stream.filename && !stream.folderName)
-      ) {
-        return undefined;
-      }
-
-      // Keep token boundaries while folding punctuation/separators so
-      // bare-episode filenames can be matched conservatively.
-      const normaliseBareEpisodeText = (value: string) =>
-        value
-          .normalize('NFKD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase()
-          .replace(/&/g, ' and ')
-          // Keep fractional episode numbers distinct from integer episodes.
-          .replace(/(\d)\.(\d+)(?=(?:v\d+)?(?![\p{L}\p{N}]))/gu, '$1decimal$2')
-          .replace(/[^\p{L}\p{N}]+/gu, ' ')
-          .trim();
-
-      const filenameParts = stream.filename?.split(/[\\/]/);
-      const basename = filenameParts?.pop();
-      const normalisedFilename = normaliseBareEpisodeText(basename ?? '');
-      const normalisedFolder = normaliseBareEpisodeText(
-        [stream.folderName, ...(filenameParts ?? [])].filter(Boolean).join(' ')
-      );
-      // Prefer the full matching alias over a shorter suffix alias.
-      const aliases = [animeEntry.title, ...(animeEntry.synonyms ?? [])]
-        .filter((title): title is string => !!title)
-        .sort(
-          (a, b) =>
-            normaliseBareEpisodeText(b).length -
-            normaliseBareEpisodeText(a).length
-        );
-
-      const matchedAlias = aliases.find((alias) => {
-        const normalisedAlias = normaliseBareEpisodeText(alias);
-        if (!normalisedAlias) return false;
-
-        const escapedAlias = normalisedAlias.replace(
-          /[.*+?^${}()|[\]\\]/g,
-          '\\$&'
-        );
-
-        const episodePattern = `(?:e\\s*)?0*${normaliseBareEpisodeText(String(animeEpisode))}(?:v\\d+)?`;
-        const aliasAndEpisode = new RegExp(
-          `(?:^|\\s)${escapedAlias}\\s+${episodePattern}(?:\\s|$)`,
-          'u'
-        );
-        // With no selected filename, the folder describes the release.
-        if (!stream.filename) return aliasAndEpisode.test(normalisedFolder);
-        return (
-          aliasAndEpisode.test(normalisedFilename) ||
-          (new RegExp(`(?:^|\\s)${escapedAlias}(?:\\s|$)`, 'u').test(
-            normalisedFolder
-          ) &&
-            new RegExp(`^${episodePattern}(?:\\s|$)`, 'u').test(
-              normalisedFilename
-            ))
-        );
-      });
-
-      if (!matchedAlias) {
-        return undefined;
-      }
-
-      return matchedAlias;
-    };
-
     const performSeasonEpisodeMatch = (stream: ParsedStream) => {
       const seasonEpisodeMatchingOptions = this.userData.seasonEpisodeMatching;
       if (
@@ -1504,6 +1591,8 @@ class StreamFilterer {
       ) {
         return true;
       }
+
+      if (recoveredEpisodeMismatches.has(stream)) return false;
 
       // if the requested content is a movie and season/episode is present, filter out
       if (

@@ -81,13 +81,18 @@ fn args() -> Args {
 
 fn app_dir(base: Option<PathBuf>) -> PathBuf {
     base.unwrap_or_else(std::env::temp_dir)
-        .join("AIOStreams Desktop")
+        .join("AIOStreams Custom")
 }
 
 /// A portable copy's own folder. Velopack runs the app from `<root>/current`,
 /// which each update replaces, and marks a portable root with `.portable`.
 fn portable_root() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
+    if let Some(dir) = exe.parent()
+        && dir.join(".portable").is_file()
+    {
+        return Some(dir.to_path_buf());
+    }
     let root = exe.parent()?.parent()?;
     root.join(".portable").is_file().then(|| root.to_path_buf())
 }
@@ -310,6 +315,7 @@ fn mpv_config_dir(config_dir: &Path) -> PathBuf {
 pub fn start_player(
     video: &platform::VideoSurface,
     mpv_dir: &Path,
+    preview_data_dir: &Path,
     emit: impl Fn(Outbound) + Send + Sync + 'static,
 ) -> Player {
     let mut defaults: Vec<(&str, String)> = vec![
@@ -363,8 +369,14 @@ pub fn start_player(
         now_playing::observe(&message);
         emit(message)
     };
-    Player::start(library, &defaults, &required, Arc::new(emit))
-        .unwrap_or_else(|e| platform::fatal(&format!("mpv failed to start: {e}")))
+    Player::start(
+        library,
+        preview_data_dir,
+        &defaults,
+        &required,
+        Arc::new(emit),
+    )
+    .unwrap_or_else(|e| platform::fatal(&format!("mpv failed to start: {e}")))
 }
 
 /// `emit` is called on the player's own threads.
@@ -450,6 +462,116 @@ pub fn handle(
     };
     let player = player.borrow();
     match message {
+        Inbound::PreviewStart {
+            session,
+            url,
+            source,
+        } => {
+            if preview_session(&session)
+                && url.len() <= 16384
+                && aiostreams_desktop_core::bridge::command(&[
+                    "loadfile".into(),
+                    url.clone().into(),
+                ])
+                .is_ok()
+                && let Some(p) = player.as_ref()
+            {
+                p.previews.start_with_source(session, url, source);
+            }
+        }
+        Inbound::PreviewStop { session } => {
+            if let Some(p) = player.as_ref() {
+                p.previews.stop(&session);
+            }
+        }
+        Inbound::PreviewRequest { session, position } => {
+            if let Some(p) = player.as_ref() {
+                p.previews.request(&session, position);
+            }
+        }
+        Inbound::PreviewHover { session, active } => {
+            if let Some(p) = player.as_ref() {
+                p.previews.hover(&session, active);
+            }
+        }
+        Inbound::PreviewReport {
+            session,
+            event,
+            position,
+            elapsed_ms,
+            reason,
+            sampled_position,
+            hover_to_image_ms,
+            demand_stall_ms,
+        } => {
+            if preview_session(&session)
+                && position.is_finite()
+                && elapsed_ms.is_finite()
+                && (0.0..=86_400_000.0).contains(&elapsed_ms)
+                && matches!(
+                    event.as_str(),
+                    "miss"
+                        | "display-cached"
+                        | "display-cold"
+                        | "source-skipped"
+                        | "timeline-enter"
+                        | "timeline-leave"
+                        | "off-look"
+                        | "demand-ready"
+                )
+            {
+                let reason = reason
+                    .filter(|s| {
+                        matches!(
+                            s.as_str(),
+                            "debrid-uncached"
+                                | "usenet"
+                                | "p2p"
+                                | "live"
+                                | "unknown"
+                                | "external"
+                                | "infinite"
+                                | "no-direct-play"
+                                | "disabled"
+                                | "retry-backoff"
+                                | "not-seekable"
+                                | "duration-unsupported"
+                                | "test-unavailable"
+                                | "decoder-init"
+                                | "dolby-vision-profile-unsupported"
+                                | "dolby-vision-needs-conversion"
+                                | "dv-base-filter"
+                                | "colour-filter"
+                                | "p5-invalid-output"
+                                | "vulkan-unavailable"
+                                | "libplacebo-missing"
+                                | "libplacebo-options-unavailable"
+                                | "colour-filter-failed"
+                        )
+                    })
+                    .unwrap_or_default();
+                if let Some(p) = player.as_ref() {
+                    p.previews.report_display(&session, &event);
+                }
+                if event == "source-skipped" {
+                    log::info!(target: "seek_preview", "session={session} preview_mode=off reason={reason} decoder_open=false");
+                }
+                if event != "display-cached" {
+                    log::info!(target: "seek_preview", "session={session} ui={event} reason={reason} position_s={position:.3} sampled_s={:?} elapsed_ms={elapsed_ms:.1}", sampled_position.filter(|v| v.is_finite() && (0.0..=86400.0).contains(v)));
+                }
+                if let Some(ms) =
+                    demand_stall_ms.filter(|v| v.is_finite() && (0.0..=86_400_000.0).contains(v))
+                {
+                    log::info!(target: "seek_preview", "session={session} demand_stall_ms={ms:.1} ui={event} demand_timer=first-unanswered-in-pointer-run");
+                }
+                if event == "display-cold"
+                    && let Some(ms) = hover_to_image_ms
+                        .filter(|v| v.is_finite() && (0.0..=86_400_000.0).contains(v))
+                {
+                    log::info!(target: "seek_preview", "session={session} hover_to_image_ms={ms:.1} display_kind=cold position_s={position:.3}");
+                }
+            }
+        }
         Inbound::MpvCommand {
             args,
             external: to_external,
@@ -566,4 +688,8 @@ pub fn handle(
             log::error!(target: "web", "{message}");
         }
     }
+}
+
+fn preview_session(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
 }

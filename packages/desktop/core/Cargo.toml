@@ -12,3 +12,5 @@ log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url = "2"
+base64 = "0.22"
+jpeg-encoder = "0.6"

@@ -30,6 +30,7 @@ enum Request {
 
 /// Makes the page's mpv calls on a thread of its own: the caller may be the render thread mpv waits on.
 pub struct Player {
+    pub previews: crate::previews::Previews,
     mpv: Arc<Mpv>,
     quit: Arc<AtomicBool>,
     events: Option<JoinHandle<()>>,
@@ -44,6 +45,7 @@ impl Player {
     /// `defaults` apply before the user's mpv.conf, `required` after it.
     pub fn start(
         library: &Path,
+        preview_data_dir: &Path,
         defaults: &[(&str, &str)],
         required: &[(&str, &str)],
         emit: Emit,
@@ -59,6 +61,13 @@ impl Player {
             mpv.observe(name, *kind, id as u64)?;
         }
         let versions = (text(&mpv, "mpv-version"), text(&mpv, "ffmpeg-version"));
+        log::info!(target: "seek_preview", "decoder mpv={} ffmpeg={}", versions.0.as_deref().unwrap_or("unknown"), versions.1.as_deref().unwrap_or("unknown"));
+        let previews = crate::previews::Previews::with_data_dir(
+            library,
+            mpv.clone(),
+            emit.clone(),
+            Some(preview_data_dir),
+        )?;
         log::info!(
             "mpv started version=\"{}\" ffmpeg={}",
             versions.0.as_deref().unwrap_or_default(),
@@ -81,6 +90,7 @@ impl Player {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            previews,
             mpv,
             quit,
             events: Some(events),
@@ -100,6 +110,9 @@ impl Player {
     /// Errs only on refused arguments; mpv's own errors reach the page as a message.
     pub fn command(&self, args: &[Value]) -> Result<(), String> {
         let args = bridge::command(args)?;
+        if args.first().is_some_and(|name| name == "seek") {
+            self.previews.main_seek();
+        }
         match args.as_slice() {
             [name, url, _, _, options, ..] if name == "loadfile" => {
                 log::info!("load url={url} options={options}")

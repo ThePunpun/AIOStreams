@@ -27,3 +27,7 @@ ignore-dev-dependencies = true
 # The app's own crates, which are not published.
 [private]
 ignore = true
+
+# JPEG DCT code carries the IJG licence in addition to the crate's MIT licence.
+[jpeg-encoder]
+accepted = ["MIT", "IJG"]

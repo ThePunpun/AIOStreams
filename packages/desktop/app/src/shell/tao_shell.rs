@@ -140,7 +140,7 @@ pub fn run(app: App) {
     });
     let mut placement = placement::load(&data_dir);
     let builder = WindowBuilder::new()
-        .with_title("AIOStreams")
+        .with_title("AIOStreams Custom")
         .with_window_icon(platform::window_icon())
         .with_inner_size(LogicalSize::new(placement.width, placement.height))
         .with_min_inner_size(LogicalSize::new(MIN_SIZE.0, MIN_SIZE.1))
@@ -169,7 +169,7 @@ pub fn run(app: App) {
     let size = window.inner_size();
 
     let video = platform::VideoSurface::new(&window).unwrap_or_else(|e| platform::fatal(&e));
-    let started = start_player(&video, &paths.mpv, {
+    let started = start_player(&video, &paths.mpv, &data_dir, {
         let proxy = proxy.clone();
         move |message: Outbound| {
             let _ = proxy.send_event(UserEvent::Emit(receive_script(&message)));

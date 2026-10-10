@@ -28,6 +28,7 @@ import {
   type Track,
 } from '../../playback/controller';
 import { useLatest } from '../../use-latest';
+import { useSeekPreviews } from './previews';
 
 interface MpvTrack {
   id: number;
@@ -72,6 +73,7 @@ const SUBTITLE_TYPES = ['srt', 'vtt', 'ass', 'ssa', 'sub', 'sup'];
 export function useShellPlayer(opts: NativePlayerOptions): PlayerController {
   const { item, source, startMs, url, launched } = opts;
   const external = !!launched;
+  const seekPreviews = useSeekPreviews(source, url, external);
   const [state, setState] = React.useState(() => initialState(source, startMs));
   const [tracks, setTracks] = React.useState<MpvTrack[]>([]);
   const [chapters, setChapters] = React.useState<Chapter[]>([]);
@@ -361,6 +363,7 @@ export function useShellPlayer(opts: NativePlayerOptions): PlayerController {
       ...tracks.filter((t) => t.type === 'sub' && !fromServer(t)).map(toTrack),
       ...externals.map(({ id, label, lang }) => ({ id, label, lang })),
     ],
+    seekPreviews,
     togglePlay: () => set('pause', !latest.current.state.paused),
     seek: (ms) => {
       command('seek', ms / 1000, 'absolute');

@@ -11,6 +11,52 @@ use crate::now_playing::{self, MediaKey};
 /// Bumped when a message changes shape, so pages can tell shells apart.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewColour {
+    #[default]
+    Unknown,
+    Sdr,
+    Pq,
+    Hlg,
+    DvPq,
+    DvHlg,
+    DvSdr,
+    Dv,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreviewMode {
+    #[default]
+    Full,
+    DemandOnly,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PreviewSourceKind {
+    Debrid,
+    Usenet,
+    Http,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PreviewSource {
+    #[serde(default)]
+    pub mode: PreviewMode,
+    #[serde(default)]
+    pub kind: PreviewSourceKind,
+    #[serde(default)]
+    pub colour: PreviewColour,
+    pub dv_profile: Option<u64>,
+    pub bitrate: Option<f64>,
+    pub width: Option<u32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateChannel {
@@ -21,6 +67,33 @@ pub enum UpdateChannel {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Inbound {
+    PreviewStart {
+        session: String,
+        url: String,
+        #[serde(default)]
+        source: PreviewSource,
+    },
+    PreviewStop {
+        session: String,
+    },
+    PreviewRequest {
+        session: String,
+        position: Option<f64>,
+    },
+    PreviewHover {
+        session: String,
+        active: bool,
+    },
+    PreviewReport {
+        session: String,
+        event: String,
+        position: f64,
+        elapsed_ms: f64,
+        reason: Option<String>,
+        sampled_position: Option<f64>,
+        hover_to_image_ms: Option<f64>,
+        demand_stall_ms: Option<f64>,
+    },
     /// `external` messages go to the player started with `external-open`.
     MpvCommand {
         args: Vec<Value>,
@@ -110,6 +183,25 @@ pub enum Inbound {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Outbound {
+    PreviewStatus {
+        session: String,
+        state: String,
+        reason: String,
+        terminal: bool,
+        step_ms: u32,
+        aspect_ratio: Option<f64>,
+    },
+    PreviewFrame {
+        session: String,
+        bucket: u32,
+        position: f64,
+        covers_until: f64,
+        covers_from: f64,
+        image: String,
+        aspect_ratio: f64,
+        cached: bool,
+        elapsed_ms: u64,
+    },
     MpvProp {
         name: String,
         data: Value,

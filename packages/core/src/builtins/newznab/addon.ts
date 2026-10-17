@@ -16,6 +16,8 @@ import {
   NabAddonConfigSchema,
   NabAddonConfig,
   parseNabParsedFileInfo,
+  parseNabReleaseIds,
+  parseNabReleaseMedium,
 } from '../base/nab/addon.js';
 import { ageInHoursSince } from '../utils/general.js';
 import { BuiltinProxy, createProxy } from '../../proxy/index.js';
@@ -190,7 +192,10 @@ export class NewznabAddon extends BaseNabAddon<NewznabAddonConfig, NewznabApi> {
       const parsedMediaInfo = parseNabParsedFileInfo({
         audioLanguages: result.newznab?.language,
         subtitleLanguages: result.newznab?.subs,
+        audioTracks: result.newznab?.audio_tracks,
       });
+      const releaseMedium = parseNabReleaseMedium(result.newznab);
+      const releaseIds = parseNabReleaseIds(result.newznab);
       const nzb: NZB = {
         confirmed: meta.searchType === 'id',
         hash: md5,
@@ -211,6 +216,8 @@ export class NewznabAddon extends BaseNabAddon<NewznabAddonConfig, NewznabApi> {
         parsedMediaInfo,
         // As Prowlarr does: https://github.com/Prowlarr/Prowlarr/blob/3c6e1d97ac485a70cc9d4063dd5d17af7a77584d/src/NzbDrone.Core/Indexers/Definitions/Newznab/NewznabRssParser.cs#L123-L126
         infoUrl: result.comments?.replace(/#comments$/, ''),
+        releaseIds,
+        releaseMedium,
       };
 
       const keySize =

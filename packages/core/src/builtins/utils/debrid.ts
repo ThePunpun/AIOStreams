@@ -33,6 +33,11 @@ import {
 import { ParsedResult } from '@viren070/parse-torrent-title';
 import { parseTorrentTitleCached } from '../../parser/title.js';
 import { isLocalEpisodeWrong } from '../../anime-database/episode-titles.js';
+import { isRecoveredAnimeEpisodeWrong } from '../../parser/anime-release.js';
+import {
+  recoverMovieRelease,
+  recoverNzbRelease,
+} from '../../parser/release.js';
 import {
   preprocessTitle,
   normaliseTitle,
@@ -92,8 +97,10 @@ function getValidationFailureReason(
   return null;
 }
 
-// Runs before .torrent download to skip resolving results that
-// processTorrents would discard anyway.
+/**
+ * Skip resolving torrents that would fail metadata validation, using the same
+ * exact movie-title recovery as the later torrent-processing paths.
+ */
 export function filterUnprocessedTorrentsPreDownload<
   T extends UnprocessedTorrent,
 >(torrents: T[], metadata?: Metadata): T[] {
@@ -103,7 +110,10 @@ export function filterUnprocessedTorrentsPreDownload<
   for (const t of torrents) {
     const key = t.title ?? '';
     if (!parsedTitlesMap.has(key)) {
-      parsedTitlesMap.set(key, parseTorrentTitleCached(key));
+      parsedTitlesMap.set(
+        key,
+        recoverMovieRelease(key, parseTorrentTitleCached(key), metadata)
+      );
     }
   }
   const normTitles: Set<string> | null = metadata.titles?.length
@@ -132,6 +142,10 @@ export function filterUnprocessedTorrentsPreDownload<
   return filtered;
 }
 
+/**
+ * Check torrent availability across configured debrid services and select
+ * matching video files using request-specific title recovery.
+ */
 export async function processTorrents(
   torrents: Torrent[],
   debridServices: BuiltinDebridServices,
@@ -165,7 +179,10 @@ export async function processTorrents(
   for (const t of torrents) {
     const key = t.title ?? '';
     if (!sharedParsedTitlesMap.has(key)) {
-      sharedParsedTitlesMap.set(key, parseTorrentTitleCached(key));
+      sharedParsedTitlesMap.set(
+        key,
+        recoverMovieRelease(key, parseTorrentTitleCached(key), metadata)
+      );
     }
   }
 
@@ -247,6 +264,10 @@ export async function processTorrents(
   return { results, errors, serviceTimings };
 }
 
+/**
+ * Validate torrent titles and select files for one service, sharing recovered
+ * parses while retaining service-specific availability and timing results.
+ */
 async function processTorrentsForDebridService(
   torrents: Torrent[],
   service: BuiltinDebridServices[number],
@@ -327,7 +348,10 @@ async function processTorrentsForDebridService(
     for (const torrent of torrents) {
       const key = torrent.title ?? '';
       if (!parsedTitlesMap.has(key)) {
-        parsedTitlesMap.set(key, parseTorrentTitleCached(key));
+        parsedTitlesMap.set(
+          key,
+          recoverMovieRelease(key, parseTorrentTitleCached(key), metadata)
+        );
       }
     }
   }
@@ -362,7 +386,11 @@ async function processTorrentsForDebridService(
     if (!parsedTitlesMap.has(effectiveTitle)) {
       parsedTitlesMap.set(
         effectiveTitle,
-        parseTorrentTitleCached(effectiveTitle)
+        recoverMovieRelease(
+          effectiveTitle,
+          parseTorrentTitleCached(effectiveTitle),
+          metadata
+        )
       );
     }
     const parsedTorrent = parsedTitlesMap.get(effectiveTitle);
@@ -494,6 +522,10 @@ async function processTorrentsForDebridService(
   };
 }
 
+/**
+ * Validate supplied torrent metadata and choose matching inner video files for
+ * direct P2P streams without making debrid availability calls.
+ */
 export async function processTorrentsForP2P(
   torrents: Torrent[],
   metadata?: Metadata
@@ -503,7 +535,7 @@ export async function processTorrentsForP2P(
   // Parse only torrent titles and perform validation checks
   const torrentTitles = torrents.map((torrent) => torrent.title ?? '');
   const parsedTitles: ParsedResult[] = torrentTitles.map((title) =>
-    parseTorrentTitleCached(title)
+    recoverMovieRelease(title, parseTorrentTitleCached(title), metadata)
   );
   const parsedTitlesMap = new Map<string, ParsedResult>();
   for (const [index, result] of parsedTitles.entries()) {
@@ -588,6 +620,10 @@ export async function processTorrentsForP2P(
   return results;
 }
 
+/**
+ * Check NZBs across Usenet-capable services, sharing recovered title parses and
+ * collecting results and errors independently for each service.
+ */
 export async function processNZBs(
   nzbs: NZB[],
   debridServices: BuiltinDebridServices,
@@ -610,7 +646,10 @@ export async function processNZBs(
   for (const n of nzbs) {
     const key = n.title ?? '';
     if (!sharedParsedNzbTitlesMap.has(key)) {
-      sharedParsedNzbTitlesMap.set(key, parseTorrentTitleCached(key));
+      sharedParsedNzbTitlesMap.set(
+        key,
+        recoverNzbRelease(key, parseTorrentTitleCached(key), metadata)
+      );
     }
   }
 
@@ -649,6 +688,10 @@ export async function processNZBs(
   return { results, errors };
 }
 
+/**
+ * Validate recovered NZB titles and choose video files for one Usenet service,
+ * retaining absolute-episode mismatch rejection and file-count limits.
+ */
 async function processNZBsForDebridService(
   nzbs: NZB[],
   service: BuiltinDebridServices[number],
@@ -717,7 +760,10 @@ async function processNZBsForDebridService(
     for (const nzb of nzbs) {
       const key = nzb.title ?? '';
       if (!parsedTitlesMap.has(key)) {
-        parsedTitlesMap.set(key, parseTorrentTitleCached(key));
+        parsedTitlesMap.set(
+          key,
+          recoverNzbRelease(key, parseTorrentTitleCached(key), metadata)
+        );
       }
     }
   }
@@ -747,22 +793,23 @@ async function processNZBsForDebridService(
       continue;
     }
     const effectiveTitle = nzb.title ?? nzbCheckResult?.name ?? '';
-    if (!parsedTitlesMap.has(effectiveTitle)) {
-      parsedTitlesMap.set(
-        effectiveTitle,
-        parseTorrentTitleCached(effectiveTitle)
-      );
-    }
-    const parsedNzb = parsedTitlesMap.get(effectiveTitle);
-
+    const originalParsed = parseTorrentTitleCached(effectiveTitle);
+    const parsedNzb =
+      parsedTitlesMap.get(effectiveTitle) ??
+      recoverNzbRelease(effectiveTitle, originalParsed, metadata);
+    parsedTitlesMap.set(effectiveTitle, parsedNzb);
     if (metadata && parsedNzb) {
-      const reason = getValidationFailureReason(
-        nzb.title ?? nzbCheckResult?.name,
-        parsedNzb,
-        metadata,
-        nzb.confirmed,
-        normTitles
-      );
+      const reason =
+        parsedNzb !== originalParsed &&
+        isRecoveredAnimeEpisodeWrong(parsedNzb, metadata)
+          ? 'absolute-episode'
+          : getValidationFailureReason(
+              nzb.title ?? nzbCheckResult?.name,
+              parsedNzb,
+              metadata,
+              nzb.confirmed,
+              normTitles
+            );
       if (reason) {
         continue;
       }
@@ -777,7 +824,7 @@ async function processNZBsForDebridService(
       continue;
     }
 
-    validNZBs.push({ nzb, nzbCheckResult, parsedTitle: parsedNzb! });
+    validNZBs.push({ nzb, nzbCheckResult, parsedTitle: parsedNzb });
   }
 
   // Parse files only for valid NZBs

@@ -42,6 +42,10 @@ import {
   scopeAnimeEpisodeMappings,
 } from './id-resolution.js';
 import { SkyhookMetadata } from './skyhook.js';
+import {
+  hasExternalEpisodeCoordinates,
+  mapExternalEpisodeToTmdb,
+} from '../anime-database/episode-coordinates.js';
 
 const logger = createLogger('metadata-service');
 
@@ -69,10 +73,16 @@ export class MetadataService {
     id: ParsedId,
     type: (typeof TYPES)[number]
   ): Promise<Metadata> {
+    // Older entries cache show-level dates and aliases chosen before external
+    // episode translation. Keep them separate from the corrected metadata.
+    const episodeCacheVersion =
+      type === 'series' && hasExternalEpisodeCoordinates(id)
+        ? ':external-episode-v1'
+        : '';
     return withRetry(
       async () => {
         const { result } = await this.lock.withLock(
-          `metadata:${id.mediaType}:${id.type}:${id.value}:${id.season ?? ''}:${id.episode ?? ''}${this.config.tmdbAccessToken || this.config.tmdbApiKey ? ':tmdb' : ''}${this.config.tvdbApiKey ? ':tvdb' : ''}`,
+          `metadata:${id.mediaType}:${id.type}:${id.value}:${id.season ?? ''}:${id.episode ?? ''}${this.config.tmdbAccessToken || this.config.tmdbApiKey ? ':tmdb' : ''}${this.config.tvdbApiKey ? ':tvdb' : ''}${episodeCacheVersion}`,
           async () => {
             const start = Date.now();
             // fill order is irrelevant; merge.ts decides what wins
@@ -509,6 +519,7 @@ export class MetadataService {
 
             // anime entries partition and renumber seasons
             const mapEpisodeForTmdb = () =>
+              (animeEntry && mapExternalEpisodeToTmdb(id, animeEntry)) ||
               getTmdbEpisode(id, animeEntry, merged.seasons ?? []);
 
             if (
@@ -611,6 +622,7 @@ export class MetadataService {
             let episodeReleased: string | undefined;
             let tvdbSeason: number | undefined;
             let tvdbEpisode: number | undefined;
+            let animeEpisodeAirDate: string | undefined;
             let episodeYear: number | undefined;
             let seasonYear: number | undefined;
             if (type === 'series' && id.season && id.episode) {
@@ -724,6 +736,31 @@ export class MetadataService {
                 tvdbEp?.airDate ??
                 skyhookEp?.airDate ??
                 tmdbEp?.airDate;
+              // These episode lookups already resolved a date in the request's
+              // numbering scheme. Retain it even if TMDB has no episode yet.
+              if (
+                animeEntry &&
+                hasExternalEpisodeCoordinates(id) &&
+                referenceAirDate
+              ) {
+                // Validate the source calendar date before parsing: Date can
+                // otherwise roll impossible dates into the following month.
+                // Provider datetimes retain their existing UTC conversion.
+                const datePart = referenceAirDate.slice(0, 10);
+                const supportedFormat =
+                  /^\d{4}-\d{2}-\d{2}(?:T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?$/.test(
+                    referenceAirDate
+                  );
+                const date = new Date(referenceAirDate);
+                if (
+                  supportedFormat &&
+                  !Number.isNaN(Date.parse(datePart)) &&
+                  new Date(datePart).toISOString().slice(0, 10) === datePart &&
+                  !Number.isNaN(date.getTime())
+                ) {
+                  animeEpisodeAirDate = date.toISOString().slice(0, 10);
+                }
+              }
               const agreesWithRequest = (airDate?: string) => {
                 if (!referenceAirDate || !airDate) return true;
                 const ref = new Date(referenceAirDate).getTime();
@@ -907,7 +944,8 @@ export class MetadataService {
               lastAiredDate: merged.lastAiredDate,
               isDateBased: episodeFacts?.isDateBased || undefined,
               episodeAirDates: episodeFacts?.episodeAirDates,
-              episodeAirDate: episodeFacts?.episodeAirDates?.[0],
+              episodeAirDate:
+                animeEpisodeAirDate ?? episodeFacts?.episodeAirDates?.[0],
               episodeReleased,
               tvdbSeason,
               tvdbEpisode,

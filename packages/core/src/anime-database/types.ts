@@ -192,6 +192,8 @@ export interface AnimeEntryMappings {
 export interface AnimeEntry {
   /** Distinct titles of other anime parts sharing an external show ID. */
   siblingTitles?: string[];
+  /** Entry titles not shared with other candidates for an external show ID. */
+  localEpisodeTitles?: string[];
   mappings?: AnimeEntryMappings;
   type: AnimeType;
   imdb?: {
